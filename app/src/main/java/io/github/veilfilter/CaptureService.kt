@@ -17,6 +17,7 @@ import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
@@ -116,22 +117,44 @@ class CaptureService : Service() {
         val wctx = createDisplayContext(display)
             .createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null)
         windowCtx = wctx
-        val r = OverlayRenderer(wctx)
+        val probe = CaptureProbe()
+        val r = OverlayRenderer(wctx, probe)
         renderer = r
-        r.prewarm(4) // window creation is slow; do it before the first detection
+        r.prewarm(PREWARM_WINDOWS) // window + surface creation is slow; do it before the first detection
+        val vsync = 1000f / max(30f, display.refreshRate)
+        r.vsyncMs = vsync
 
-        val t = HandlerThread("veil-infer", Process.THREAD_PRIORITY_DISPLAY).apply { start() }
+        val t = HandlerThread("veil-capture", Process.THREAD_PRIORITY_URGENT_DISPLAY).apply { start() }
         thread = t
         val h = Handler(t.looper)
         worker = h
+        val model = AppSettings.modelSize
+        val backendId = AppSettings.backend
+        val soc = "${Build.SOC_MANUFACTURER} ${Build.SOC_MODEL}".trim()
         val p = Pipeline(
-            detectorFactory = { Detector.create(applicationContext) },
-            publish = { s -> r.submit(s) },
-            drawn = { id -> r.drawnFor(id) },
-            onStats = { st -> main.post { showStats(st) } },
+            detectorFactory = { Backends.create(applicationContext, backendId, model) },
+            model = model,
+            renderer = r,
+            probe = probe,
+            capture = h,
+            onHud = { text -> main.post { showHud(text) } },
+            onFatal = { msg ->
+                ServiceState.lastError = msg
+                main.post { shutdown() }
+            },
+            socInfo = soc,
         )
         p.sceneGuardEnabled = AppSettings.sceneGuard
+        p.csvLog = AppSettings.csvLog
+        p.vsyncMs = vsync
+        p.extraLeadMs = AppSettings.extraLeadMs.toFloat()
         pipeline = p
+        if (p.csvLog) {
+            Log.i(Pipeline.CSV, Pipeline.CSV_HEADER_F)
+            Log.i(Pipeline.CSV, Pipeline.CSV_HEADER_D)
+            Log.i(Pipeline.CSV, "I,soc=$soc,model=${model.px},backend=$backendId,runtime=${Backends.RUNTIME},refresh=${display.refreshRate}")
+        }
+        p.start()
 
         // Callback must be registered before createVirtualDisplay (Android 14).
         mp.registerCallback(projectionCallback, main)
@@ -145,29 +168,20 @@ class CaptureService : Service() {
             ir.surface, null, null,
         )
 
-        h.post {
-            try {
-                Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY)
-            } catch (_: Throwable) {}
-            try {
-                p.init()
-            } catch (t2: Throwable) {
-                Log.e(TAG, "detector init failed", t2)
-                ServiceState.lastError = "Model failed to load: ${t2.message}"
-                main.post { shutdown() }
-            }
-        }
+        r.showProbe()
         ServiceState.lastError = null
         ServiceState.set(true)
-        if (AppSettings.debugHud) r.showHud("Veil: starting…")
+        if (AppSettings.debugHud) r.showHud("Veil: starting… (${Backends.RUNTIME})")
     }
 
     private fun newReader(w: Int, h: Int): ImageReader {
-        val ir = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+        val ir = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3)
         val p = pipeline!!
         ir.setOnImageAvailableListener({ rd ->
             // keep settings live
             p.sceneGuardEnabled = AppSettings.sceneGuard
+            p.csvLog = AppSettings.csvLog
+            p.extraLeadMs = AppSettings.extraLeadMs.toFloat()
             p.onImageAvailable(rd)
         }, worker)
         return ir
@@ -202,7 +216,12 @@ class CaptureService : Service() {
             val h = (ch * scale).roundToInt()
             rect.set(db.centerX() - w / 2, db.centerY() - h / 2, db.centerX() - w / 2 + w, db.centerY() - h / 2 + h)
         }
-        renderer?.contentRect?.set(rect)
+        renderer?.let {
+            it.contentRect.set(rect)
+            it.frameW = capW
+            it.frameH = capH
+            it.relayoutProbe()
+        }
     }
 
     /** Scale the screen density with the capture so layouts are mirrored 1:1. */
@@ -247,16 +266,9 @@ class CaptureService : Service() {
         reconfigure()
     }
 
-    private fun showStats(st: Stats) {
+    private fun showHud(text: String?) {
         val r = renderer ?: return
-        if (!AppSettings.debugHud) { r.showHud(null); return }
-        r.showHud(
-            String.format(
-                java.util.Locale.US,
-                "%s\ndetector %.1f ms | %.1f fps\ncapture→censor %.0f ms\ntracks %d (occluded %d) | %dx%d",
-                st.backend, st.detectorMs, st.fps, st.latencyMs, st.tracks, st.occluded, st.frameW, st.frameH,
-            ),
-        )
+        r.showHud(if (AppSettings.debugHud) text else null)
     }
 
     private fun shutdown() {
@@ -282,6 +294,7 @@ class CaptureService : Service() {
             // Detector must be closed on the thread that created it.
             wk.post {
                 try { ir?.close() } catch (_: Throwable) {}
+                // stops the inference thread, which closes the detector on its own thread
                 try { p?.release() } catch (_: Throwable) {}
                 thread?.quitSafely()
                 thread = null
@@ -333,6 +346,7 @@ class CaptureService : Service() {
         private const val CHANNEL = "protection"
         private const val NOTIF_ID = 1
         const val TARGET_SHORT_SIDE = 540f
+        const val PREWARM_WINDOWS = 6
 
         fun start(ctx: Context, code: Int, data: Intent) {
             ctx.startForegroundService(

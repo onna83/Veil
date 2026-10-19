@@ -14,7 +14,9 @@ import kotlin.math.min
  *  - a track that is not re-detected stays for [missTimeoutMs];
  *  - a track whose region currently shows our own pixelation in the capture
  *    (full-screen capture self-occlusion, see [markOccluded]) is kept for up
- *    to [occludedTimeoutMs] and frozen in place, and is dropped on a scene cut.
+ *    until [occludedTimeoutMs]; its residual motion is frozen but global
+ *    scroll still moves it ([applyShift]); it is dropped on a scene cut or when
+ *    its surroundings stop matching (RingCheck, in the pipeline).
  *
  * All coordinates are capture-frame pixels, times are milliseconds on one
  * monotonic clock.
@@ -24,7 +26,8 @@ class Tracker(
     var keepThreshold: Float = 0.20f,
     var matchIou: Float = 0.15f,
     var missTimeoutMs: Long = 400,
-    var occludedTimeoutMs: Long = 3000,
+    /** occluded tracks are re-validated by their surroundings (RingCheck), so this is long */
+    var occludedTimeoutMs: Long = 20_000,
     var occludedGraceMs: Long = 300,
     var smoothing: Float = 0.6f, // weight of the new measurement
     var maxExtrapolateMs: Long = 200,
@@ -43,6 +46,9 @@ class Tracker(
         var born = 0L
         var lastOccluded = Long.MIN_VALUE / 2
         var occludedSince = Long.MIN_VALUE / 2
+        /** time of the last detector confirmation (match or birth) */
+        var confirmedAt = Long.MIN_VALUE / 2
+        val ring = RingSignature()
 
         fun isOccluded(now: Long, graceMs: Long) = now - lastOccluded <= graceMs
 
@@ -68,9 +74,23 @@ class Tracker(
     fun markOccluded(track: Track, now: Long) {
         if (!track.isOccluded(now, occludedGraceMs)) track.occludedSince = now
         track.lastOccluded = now
-        // frozen while occluded: we cannot observe motion under our own censor
+        // We cannot observe the object's own motion under our censor: zero the
+        // residual velocity. Global scroll still moves it (applyShift).
         track.vx = 0f; track.vy = 0f
     }
+
+    /**
+     * Global content shift (scroll) measured on the newest frame: move every
+     * track, occluded or not, so censors stay glued to the content.
+     */
+    fun applyShift(dx: Float, dy: Float) {
+        if (dx == 0f && dy == 0f) return
+        for (tr in tracks) {
+            tr.x1 += dx; tr.x2 += dx; tr.y1 += dy; tr.y2 += dy
+        }
+    }
+
+    fun remove(track: Track) { tracks.remove(track) }
 
     /**
      * Update with detections from the frame captured at [now].
@@ -151,6 +171,7 @@ class Tracker(
             tr.hits = 1; tr.score = dScore[i]; tr.cls = dCls[i]
             tr.lastOccluded = Long.MIN_VALUE / 2
             tr.occludedSince = Long.MIN_VALUE / 2
+            tr.confirmedAt = now
             tracks.add(tr)
         }
     }
@@ -185,6 +206,7 @@ class Tracker(
         tr.x2 = max(sx2, mx2); tr.y2 = max(sy2, my2)
         tr.t = now
         tr.lastSeen = now
+        tr.confirmedAt = now
         tr.hits++
         tr.score = s
         tr.cls = c

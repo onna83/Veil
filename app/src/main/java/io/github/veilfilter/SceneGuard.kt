@@ -42,7 +42,12 @@ class SceneGuard(
     fun cellX(i: Int, w: Int): Float = i.toFloat() * w / grid
     fun cellY(j: Int, h: Int): Float = j.toFloat() * h / grid
 
-    fun analyze(src: ByteArray, w: Int, h: Int, rowStride: Int): Boolean {
+    /**
+     * @param excl rectangles [x1,y1,x2,y2]*n (frame px) to ignore, e.g. our own
+     *   censors in full-screen capture; cells whose centre lies inside one are
+     *   not counted in this frame's comparison.
+     */
+    fun analyze(src: ByteArray, w: Int, h: Int, rowStride: Int, excl: FloatArray = NONE, nExcl: Int = 0): Boolean {
         val g = grid
         val s = samples
         val n = s * s
@@ -70,9 +75,15 @@ class SceneGuard(
         var triggered = false
         if (hasPrev) {
             var cnt = 0
+            var valid = 0
             var l = g; var t = g; var rr = -1; var bb = -1
             for (cj in 0 until g) for (ci in 0 until g) {
                 val idx = cj * g + ci
+                if (nExcl > 0 && excluded((ci + 0.5f) * w / g, (cj + 0.5f) * h / g, excl, nExcl)) {
+                    changed[idx] = false
+                    continue
+                }
+                valid++
                 val c = abs(cur[idx] - prev[idx]) > lumaDelta
                 changed[idx] = c
                 if (c) {
@@ -83,7 +94,7 @@ class SceneGuard(
                     if (cj > bb) bb = cj
                 }
             }
-            changedFraction = cnt.toFloat() / (g * g)
+            changedFraction = if (valid == 0) 0f else cnt.toFloat() / valid
             if (changedFraction >= triggerFraction) {
                 triggered = true
                 changedL = l; changedT = t; changedR = rr; changedB = bb
@@ -96,4 +107,11 @@ class SceneGuard(
         hasPrev = true
         return triggered
     }
+
+    private fun excluded(x: Float, y: Float, r: FloatArray, n: Int): Boolean {
+        for (k in 0 until n) if (x >= r[4 * k] && x <= r[4 * k + 2] && y >= r[4 * k + 1] && y <= r[4 * k + 3]) return true
+        return false
+    }
+
+    companion object { private val NONE = FloatArray(0) }
 }

@@ -58,7 +58,7 @@ class TrackerTest {
 
     @Test
     fun occludedTracksSurviveUntilSceneCutOrTimeout() {
-        val tr = Tracker()
+        val tr = Tracker(occludedTimeoutMs = 3000)
         det(0, 100f, 100f, 150f, 150f)
         tr.update(1, x1, y1, x2, y2, s, c, 0, false)
         val t = tr.tracks.single()
@@ -91,5 +91,35 @@ class TrackerTest {
         tr.update(2, x1, y1, x2, y2, s, c, 33, false)
         assertEquals(2, tr.tracks.size)
         assertTrue(tr.tracks.all { it.hits == 2 })
+    }
+
+    @Test
+    fun globalShiftMovesOccludedTracksToo() {
+        val tr = Tracker()
+        det(0, 100f, 400f, 150f, 450f)
+        tr.update(1, x1, y1, x2, y2, s, c, 0, false)
+        val t = tr.tracks.single()
+        tr.markOccluded(t, 10)
+        // page scrolls up by 30 px per frame for 5 frames
+        var now = 10L
+        repeat(5) { now += 16; tr.applyShift(0f, -30f); tr.markOccluded(t, now); tr.update(0, x1, y1, x2, y2, s, c, now, false) }
+        assertEquals(1, tr.tracks.size)
+        assertEquals(400f - 150f, t.y1, 0.01f)
+        assertEquals(450f - 150f, t.y2, 0.01f)
+        assertEquals(100f, t.x1, 0.01f)
+    }
+
+    @Test
+    fun lateDetectionShiftedByScrollStillMatches() {
+        // Detection from an older frame, compensated by the scroll since then,
+        // must match the (already shifted) track instead of spawning a duplicate.
+        val tr = Tracker()
+        det(0, 100f, 400f, 150f, 450f)
+        tr.update(1, x1, y1, x2, y2, s, c, 0, false)
+        tr.applyShift(0f, -40f) // two frames of scroll while the detector ran
+        det(0, 100f, 400f - 40f, 150f, 450f - 40f) // = old detection + offset
+        tr.update(1, x1, y1, x2, y2, s, c, 33, false)
+        assertEquals(1, tr.tracks.size)
+        assertEquals(2, tr.tracks.single().hits)
     }
 }

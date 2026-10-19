@@ -11,11 +11,29 @@ android {
         applicationId = "io.github.veilfilter"
         minSdk = 34
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
         ndk {
             // Android 14+ phones are arm64. Add "x86_64" here to run on an emulator.
             abiFilters += listOf("arm64-v8a")
+        }
+    }
+
+    // Two detector runtimes, selectable at build time (their native libraries
+    // export the same JNI symbols, so they cannot share one APK):
+    //   classic : LiteRT 1.4 Interpreter + GPU delegate (what v1 used)
+    //   litert2 : LiteRT 2.3 CompiledModel API (new GPU engine)
+    flavorDimensions += "runtime"
+    productFlavors {
+        create("classic") {
+            dimension = "runtime"
+            resValue("string", "app_name", "Veil")
+        }
+        create("litert2") {
+            dimension = "runtime"
+            applicationIdSuffix = ".lrt2"
+            versionNameSuffix = "-litert2"
+            resValue("string", "app_name", "Veil (LiteRT 2)")
         }
     }
 
@@ -28,9 +46,6 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-    }
-    kotlinOptions {
-        jvmTarget = "17"
     }
 
     androidResources {
@@ -49,9 +64,25 @@ android {
     }
 }
 
+// LiteRT 2.3 drags in Play "AI pack" delivery (WorkManager, boot receiver,
+// network-state permission) for downloading models. Veil bundles its model and
+// is offline-only; CompiledModel/Environment/TensorBuffer do not use it.
+configurations.matching { it.name.startsWith("litert2") }.configureEach {
+    exclude(group = "com.google.android.play")
+    exclude(group = "com.google.android.gms")
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
+}
+
 dependencies {
-    implementation("com.google.ai.edge.litert:litert:1.4.2")
-    implementation("com.google.ai.edge.litert:litert-gpu:1.4.2")
-    implementation("com.google.ai.edge.litert:litert-gpu-api:1.4.2")
+    "classicImplementation"("com.google.ai.edge.litert:litert:1.4.2")
+    "classicImplementation"("com.google.ai.edge.litert:litert-gpu:1.4.2")
+    "classicImplementation"("com.google.ai.edge.litert:litert-gpu-api:1.4.2")
+    "litert2Implementation"("com.google.ai.edge.litert:litert:2.3.0")
+    "litert2Implementation"("com.google.ai.edge.litert:litert-gpu:2.3.0")
     testImplementation("junit:junit:4.13.2")
 }

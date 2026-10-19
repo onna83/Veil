@@ -1,4 +1,4 @@
-# Veil (v1)
+# Veil (v1.1)
 
 Veil is a free, open-source, **fully on-device** nudity filter for Android 14+.
 It watches the screen with MediaProjection, runs the NudeNet v3 `320n` detector
@@ -10,8 +10,92 @@ v1 is deliberately minimal. It has one censor style (pixelate) and is built for
 **low latency**. There is no browser, recording, stats, presets, PIN or
 translations.
 
-> **Status:** compiles, and the core logic is unit-tested on the JVM. It has
-> **not yet run on a real device.** See "Testing status" below.
+> **Status:** v1 ran on a Galaxy S23 FE (censoring works; visible lag while
+> scrolling). v1.1 targets that scroll lag. It compiles and its core logic is
+> unit-tested on the JVM, but **v1.1 has not run on a device yet.**
+
+## What's new in v1.1 (scroll / video latency)
+
+v1 moved censors only when the detector produced a result, from a frame that
+was already ~25 ms old by then, and did everything on one thread. While
+scrolling, the box therefore trailed the content by (scroll speed x total
+latency). v1.1 decouples box movement from the detector:
+
+1. **Global scroll compensation at capture rate.** Each captured frame, a
+   row/column luma-projection matcher (`ShiftEstimator`, ~0.5 ms) measures how
+   far the page moved, with our own censors and the probe masked out. Every
+   track, including those under our own censor in full-screen capture, is
+   moved by that shift at once.
+2. **Detection-latency compensation.** Detections come from frame N but arrive
+   a few frames later. They are moved by the scroll accumulated since frame N
+   before they are merged, so they don't pull boxes backwards.
+3. **Forward prediction on every vsync.** Boxes carry page velocity plus
+   object velocity. A single Choreographer callback re-places every box each
+   vsync at `pos(tCapture) + v x (frameTime + lead - tCapture)`. That covers
+   the whole chain: capture delivery, analysis, the wait for vsync, and
+   render + composition + scan-out (`lead`, measured in full-screen mode,
+   otherwise 2.5 vsync). **Scroll prediction** (+0 to 60 ms) is a live slider
+   for tuning on the device.
+4. **Pipelined threads.** The capture thread copies, analyses, publishes and
+   preprocesses into one of two input slots. The inference thread always takes
+   the newest slot, so preprocessing of N+1 overlaps inference of N. Inference
+   never waits for UI work, and the UI never waits for inference. ImageReader
+   holds 3 buffers.
+5. **Cheaper overlay movement.** Each window is the box plus about 120 ms of
+   headroom in the direction of motion, and is transparent outside the box.
+   While the box stays inside, moving it is just a redraw at a new offset,
+   with no WindowManager relayout. Unused windows are parked off-screen
+   rather than set to GONE, so their surfaces stay alive. Six are pre-warmed.
+   There is never a full-screen window, which respects the Android 12+
+   untrusted-touch rule.
+6. **Full-screen capture handled explicitly.** A 6 px probe window toggles
+   colour, and from it Veil detects whether its own overlays are captured. It
+   also measures draw-to-capture latency. In full-screen mode:
+   - tracks under our censor follow the scroll and are kept for up to 20 s;
+   - they are re-validated against the uncovered ring of content around the
+     box (`RingCheck`). If the surroundings stop matching, the censor is
+     released so the detector can look again.
+7. **Scroll-entry guard** (single-app mode only). While scrolling, the strip
+   of newly revealed content at the entering edge is pixelated until the
+   detector has seen it. Its size is the scroll the detector hasn't seen,
+   plus speed x latency, plus 3 %. It is off in full-screen mode, because
+   there the guard itself would be captured and hide the content from the
+   detector. The scene-cut guard is kept. It masks our censors and does not
+   fire during a confident scroll.
+8. **Detector options.** Backend selector (Auto / GPU-OpenCL / GPU-OpenGL /
+   CPU) and an in-app benchmark. Two build flavors:
+   - `classic`: LiteRT 1.4 + GPU delegate, as in v1;
+   - `litert2`: LiteRT 2.3 `CompiledModel` with the new GPU engine. It
+     installs side by side as "Veil (LiteRT 2)".
+
+   Experimental **256 px** input: export verified, but scores are noticeably
+   lower and some classes flip on test photos, so it misses more. Off by
+   default. No INT8 (no calibration data with the target classes). No NPU:
+   LiteRT publishes NPU runtimes for Qualcomm, MediaTek and Google Tensor only,
+   not Samsung Exynos.
+9. **Per-stage HUD + CSV log**, see below.
+
+### Debug HUD fields (v1.1)
+
+```
+<backend> | <SoC>
+capture: SINGLE APP | FULL SCREEN | detecting…   <frame size>
+cap  <captured fps> (int <ms between frames>) deliver <image ts -> our thread> copy <ms>
+shift <ms> guard <ms> analyze+publish <ms> pre <ms>
+det <detections/s>: queue <ms waiting in slot> infer <ms> decode <ms> post <ms back to capture thread>
+overlay: frame-wait <publish -> vsync callback> apply <ms per vsync> layout <ms per updateViewLayout> relayout <n/s> draw <n/s>
+probe draw→cap <ms or n/a> lead <prediction ms> vsync <ms>
+e2e est: track path <ms>, new object <ms>      (ESTIMATES from the stages above)
+scroll <dx>,<dy> px/frame ok|?  | tracks <n> (occ <n>) ring-drop <n>
+```
+
+"Track path" is the latency for content that is already tracked, which
+prediction compensates. "New object" is the time until a newly appeared object
+is first covered.
+
+CSV: enable "Log per-frame timings", then
+`adb logcat -s VeilCSV > veil.csv`. `F,` lines are frames, `D,` lines are
+detections, and the header lines are printed at start.
 
 ## What it censors
 
@@ -112,8 +196,8 @@ build-tools it needs).
 ```bash
 export JAVA_HOME=/path/to/jdk-17
 echo "sdk.dir=/path/to/android-sdk" > local.properties
-./gradlew assembleDebug           # app/build/outputs/apk/debug/app-debug.apk
-./gradlew testDebugUnitTest       # JVM tests (decode, NMS, preprocess, tracker, guard)
+./gradlew assembleDebug               # both flavors: app/build/outputs/apk/{classic,litert2}/debug/
+./gradlew testClassicDebugUnitTest    # JVM tests (decode, NMS, preprocess, tracker, guards, shift, ring, probe, scroll sim)
 ```
 
 The APK is arm64-v8a only, to keep it small. To run on an x86_64 emulator, add
@@ -126,23 +210,38 @@ and one SFW sample photo.
 
 ## Install and test on your phone
 
-1. Copy `veil-v1-debug.apk` to the phone and open it. Allow "Install unknown
+1. Copy `veil-v1.1-debug.apk` (and optionally `veil-v1.1-litert2-debug.apk`) to the phone and open it. Allow "Install unknown
    apps" for the app you opened it with (Files or Chrome). Or run
-   `adb install veil-v1-debug.apk`.
+   `adb install veil-v1.1-debug.apk`.
 2. Open **Veil**, tap **Allow display over other apps**, and enable Veil.
 3. Tap **Allow notifications**. The notification carries the Stop button.
-4. Optional: switch on **Debug HUD** to see backend, detector ms per frame,
-   FPS and capture-to-censor latency.
+4. Optional: switch on **Debug HUD** for per-stage timings (fields above).
 5. Tap **Start protection**. In the system dialog choose **"A single app"**,
-   pick the app to filter, then tap Start. (Entire screen works, but our own
-   censors get captured; see limitations.)
+   pick the app to filter, then tap Start. This is strongly recommended:
+   Veil's censors are then not captured, so the detector always sees the real
+   content and the scroll guard works. Entire screen works too, but Veil is
+   blind under its own censors there and has to follow them by scroll
+   estimation.
 6. Stop from the notification, from the Android 15+ status-bar chip, or from
    the app.
 
-For a useful bug report: `adb logcat -s VeilService VeilDetector VeilOverlay`,
+For a useful bug report: `adb logcat -s VeilService VeilDetector VeilOverlay VeilPipeline VeilBench`,
 a HUD screenshot, phone model and Android version.
 
 ## Limitations
+
+- v1.1 scroll handling assumes one rigid shift of the whole frame per axis.
+  Parallax, sticky headers or a scrolling region next to a static one give a
+  compromise shift. The ring check releases tracks that no longer match.
+  Diagonal motion is approximated by its dominant axis.
+- Full-screen capture: if a censored track is released (ring mismatch, or 20 s
+  without confirmation), the content can be visible for about one detection
+  cycle before it is detected again. The probe shows a tiny dark square at the
+  left edge, mid-height (single-app: it is removed after ~2 s).
+- Overlay windows with motion headroom are transparent around the box but
+  still swallow touches in that headroom (Android touch-occlusion rule). The
+  headroom is only added along the current motion and is capped at 25 % of
+  the screen.
 
 - **Never zero-latency.** Android hands us frames only after they have been
   composed for display, so a newly appearing region can be visible for roughly
@@ -186,8 +285,20 @@ a HUD screenshot, phone model and Android version.
   - Model equivalence check (TFLite vs ONNX).
   - APK checks: 16 KB page alignment of the native libraries, model stored
     uncompressed, no INTERNET permission.
-- **Not done:** any run on a real device or emulator (the build box had no
-  KVM access). Unverified:
+- v1.1 additions: shift estimator (integer/sub-pixel, masking our censors,
+  static and unrelated content), ring check, capture probe, tracker shift,
+  and an end-to-end scroll simulation. In that simulation (0.6 px/ms scroll,
+  16 ms frames, detector 2 frames late), an uncompensated box trails by
+  19 px. The v1.1 path stays within 0.3 px, and its 40 ms forward prediction
+  within 0.4 px. This is synthetic data, not a device measurement.
+- **Not done for v1.1:** any device run. Unverified:
+  - every timing number and the expected gains;
+  - whether VirtualDisplay delivers 60/120 fps on Samsung;
+  - the LiteRT 2.3 GPU engine on Xclipse;
+  - probe colour detection through Samsung's capture pipeline;
+  - shift estimation on real apps.
+- **v1 status:** no run on a real device or emulator at that time (the build
+  box had no KVM access). Unverified then:
   - the GPU delegate on real GPUs;
   - real FPS and latency;
   - overlay placement on screens with cutouts;
