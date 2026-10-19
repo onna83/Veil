@@ -8,7 +8,7 @@ import kotlin.math.min
  * Cheap global scroll estimator.
  *
  * Every frame we build 1-D luma (green channel) profiles:
- *  - row profiles: for each row, the mean over every 4th column, separately
+ *  - row profiles: for each row, the mean over every 8th column, separately
  *    in [BANDS] vertical bands;
  *  - column profiles: for each column, the mean over every 8th row, in
  *    [BANDS] horizontal bands.
@@ -23,12 +23,12 @@ import kotlin.math.min
  * Convention: content moved by (dx, dy) from the previous frame to this one,
  * i.e. cur(x, y) ~= prev(x - dx, y - dy). Scrolling a list up gives dy < 0.
  *
- * Cost: ~240k byte reads plus ~0.3M add/abs ops per frame; no allocation
- * after the first frame of a given size.
+ * Cost (444x960 capture): ~105k sequential byte reads plus ~0.15M add/abs
+ * ops per frame; no allocation after the first frame of a given size.
  */
 class ShiftEstimator(
     /** max search range as a fraction of the frame dimension */
-    private val maxShiftFraction: Float = 0.25f,
+    private val maxShiftFraction: Float = 0.18f,
 ) {
     var dx = 0f; private set
     var dy = 0f; private set
@@ -55,6 +55,9 @@ class ShiftEstimator(
     private var colCCur = FloatArray(0); private var colCPrev = FloatArray(0)
     private var colCValCur = BooleanArray(0); private var colCValPrev = BooleanArray(0)
 
+    private var colAcc = IntArray(0)
+    private val colCnt = IntArray(BANDS)
+
     fun reset() { hasPrev = false; confident = false; static = false; dx = 0f; dy = 0f }
 
     private fun alloc(nw: Int, nh: Int) {
@@ -63,6 +66,7 @@ class ShiftEstimator(
         rowValCur = BooleanArray(BANDS * h); rowValPrev = BooleanArray(BANDS * h)
         colCur = FloatArray(BANDS * w); colPrev = FloatArray(BANDS * w)
         colValCur = BooleanArray(BANDS * w); colValPrev = BooleanArray(BANDS * w)
+        colAcc = IntArray(BANDS * w)
         val hc = h / C; val wc = w / C
         rowCCur = FloatArray(BANDS * hc); rowCPrev = FloatArray(BANDS * hc)
         rowCValCur = BooleanArray(BANDS * hc); rowCValPrev = BooleanArray(BANDS * hc)
@@ -126,7 +130,7 @@ class ShiftEstimator(
     private fun buildProfiles(src: ByteArray, stride: Int, rects: FloatArray, nRects: Int) {
         val bandW = w / BANDS
         val bandH = h / BANDS
-        // rows: every row, every 4th column, per vertical band
+        // rows: every row, every 8th column, per vertical band (sequential reads)
         for (y in 0 until h) {
             val row = y * stride + 1 // green channel
             for (b in 0 until BANDS) {
@@ -134,22 +138,31 @@ class ShiftEstimator(
                 val x1 = if (b == BANDS - 1) w else x0 + bandW
                 var s = 0; var n = 0
                 var x = x0
-                while (x < x1) { s += src[row + x * 4].toInt() and 0xFF; n++; x += 4 }
+                while (x < x1) { s += src[row + x * 4].toInt() and 0xFF; n++; x += ROW_STEP }
                 rowCur[b * h + y] = if (n > 0) s.toFloat() / n else 0f
                 rowValCur[b * h + y] = n > 0
             }
         }
-        // columns: every column, every 8th row, per horizontal band
+        // columns: every column, every 8th row, per horizontal band.
+        // Built ROW-MAJOR: walking the frame column by column (17 KB jumps)
+        // missed the cache on every read and cost ~18 ms on an Exynos 2200.
+        java.util.Arrays.fill(colAcc, 0)
+        java.util.Arrays.fill(colCnt, 0)
         for (b in 0 until BANDS) {
             val y0 = b * bandH
             val y1 = if (b == BANDS - 1) h else y0 + bandH
+            val base = b * w
+            var y = y0
+            while (y < y1) {
+                var p = y * stride + 1
+                for (x in 0 until w) { colAcc[base + x] += src[p].toInt() and 0xFF; p += 4 }
+                colCnt[b]++
+                y += COL_STEP
+            }
+            val n = colCnt[b]
             for (x in 0 until w) {
-                var s = 0; var n = 0
-                var y = y0
-                val off = x * 4 + 1
-                while (y < y1) { s += src[y * stride + off].toInt() and 0xFF; n++; y += 8 }
-                colCur[b * w + x] = if (n > 0) s.toFloat() / n else 0f
-                colValCur[b * w + x] = n > 0
+                colCur[base + x] = if (n > 0) colAcc[base + x].toFloat() / n else 0f
+                colValCur[base + x] = n > 0
             }
         }
         // invalidate cells touched by excluded rects
@@ -252,6 +265,8 @@ class ShiftEstimator(
 
     companion object {
         const val BANDS = 4
+        private const val ROW_STEP = 8
+        private const val COL_STEP = 8
         private const val C = 4 // coarse factor
         /** below this (luma levels) nothing changed */
         const val STATIC_SAD = 0.35f

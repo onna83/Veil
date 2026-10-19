@@ -1,4 +1,4 @@
-# Veil (v1.1)
+# Veil (v1.2)
 
 Veil is a free, open-source, **fully on-device** nudity filter for Android 14+.
 It watches the screen with MediaProjection, runs the NudeNet v3 `320n` detector
@@ -13,6 +13,42 @@ translations.
 > **Status:** v1 ran on a Galaxy S23 FE (censoring works; visible lag while
 > scrolling). v1.1 targets that scroll lag. It compiles and its core logic is
 > unit-tested on the JVM, but **v1.1 has not run on a device yet.**
+
+## What's new in v1.2 (new-object latency)
+
+The first S23 FE run of v1.1 (Exynos 2200 / Xclipse 920, 120 Hz, single-app
+mode, video) estimated 133 ms for a new object. Changes:
+
+- **Shift estimator: 18.7 ms → expected < 1 ms.** The column profiles walked
+  the frame column by column (17 KB jumps), which missed the cache on almost
+  every read. They are now built row-major, with half the samples. The same
+  stall had saturated the capture thread, which also caused the 45 fps capture
+  cap and `post 11.9 ms` (detections waited for the busy thread).
+- **Appearance guard** (new, on by default). Each frame keeps a 12-px cell
+  grid of skin-tone fraction (YCbCr rule tested on all 10 Monk Skin Tone
+  scale tones). It is compared with the grid of the last frame the detector
+  processed, shifted by the scroll since. Cells that became clearly more
+  skin, in groups of ≥ 4 cells and ≥ 2×2, are pixelated in the same pass that
+  publishes tracks, about one capture frame after the content appears. The
+  box stays until a detector result covers that content (at least 80 ms).
+  It ignores static content, our own censors (masked), cells inside tracks
+  and thin moving edges. Known false positives: cream, beige, wood and
+  warm-grey content when it newly appears. ~0.1–0.3 ms per frame.
+- **Auto backend = measured.** On first start, GPU-OpenCL, GPU-OpenGL and
+  CPU-XNNPACK×4 are each timed on the device and the fastest is kept. The
+  choice is cached per app version / SoC / model size. The in-app benchmark
+  also updates it. The HUD shows `auto→…`.
+- **Capture size follows the model.** The long side is 3 × model input (960
+  for 320, so 444×960 on a 19.5:9 screen, ~33 % fewer pixels than 540×1170).
+- **Overlay.** A new state is applied the moment it reaches the main thread,
+  not on the next frame callback. The HUD shows `hop`, which replaces
+  `frame-wait`; frame-wait also counted animation frames and was inflated.
+  The probe latency is used only once full-screen capture is confirmed;
+  before that, dark video content could fake a hit, as on the S23 FE
+  (`lead 55`).
+- **FP16 weights.** Both models store weights as FP16 (`tools/fp16_weights.py`),
+  half the size. On the SFW samples: max score change 5e-4, boxes < 0.9 input
+  px. Not INT8.
 
 ## What's new in v1.1 (scroll / video latency)
 
@@ -82,10 +118,11 @@ latency). v1.1 decouples box movement from the detector:
 capture: SINGLE APP | FULL SCREEN | detecting…   <frame size>
 cap  <captured fps> (int <ms between frames>) deliver <image ts -> our thread> copy <ms>
 shift <ms> guard <ms> analyze+publish <ms> pre <ms>
+appear guard: <ms>, boxes <n>, new cells <n>, fired <total>
 det <detections/s>: queue <ms waiting in slot> infer <ms> decode <ms> post <ms back to capture thread>
-overlay: frame-wait <publish -> vsync callback> apply <ms per vsync> layout <ms per updateViewLayout> relayout <n/s> draw <n/s>
+overlay: hop <publish -> applied on main> apply <ms> layout <ms per updateViewLayout> relayout <n/s> draw <n/s>
 probe draw→cap <ms or n/a> lead <prediction ms> vsync <ms>
-e2e est: track path <ms>, new object <ms>      (ESTIMATES from the stages above)
+e2e est: tracked <ms> | new obj: guard <ms>, detector <ms>   (ESTIMATES from the stages above)
 scroll <dx>,<dy> px/frame ok|?  | tracks <n> (occ <n>) ring-drop <n>
 ```
 

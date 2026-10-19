@@ -6,6 +6,7 @@
     <string name="grant_overlay">Allow display over other apps</string>
     <string name="grant_notifications">Allow notifications (for the Stop button)</string>
     <string name="scene_guard">Scene-change &amp; scroll guard (pixelate sudden cuts and newly scrolled-in content until checked)</string>
+    <string name="appearance_guard">Appearance guard: instantly pixelate newly appearing skin-coloured areas until the detector has checked them</string>
     <string name="debug_hud">Debug HUD (per-stage timings, latency estimate)</string>
     <string name="csv_log">Log per-frame timings to logcat (tag VeilCSV)</string>
     <string name="recommend_title">Recommended: choose \"A single app\"</string>

@@ -66,7 +66,8 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
     // ---- metrics (read from any thread) ----
     @Volatile var applyMsEma = 0f; private set
     @Volatile var layoutMsEma = 0f; private set      // cost of one updateViewLayout call
-    @Volatile var submitToFrameMsEma = 0f; private set
+    /** pipeline publish -> applied on the main thread (new states only) */
+    @Volatile var hopMsEma = 0f; private set
     @Volatile var relayoutsPerSec = 0f; private set
     @Volatile var drawsPerSec = 0f; private set
     private var relayouts = 0
@@ -100,12 +101,33 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
         return n
     }
 
-    private val schedule = Runnable { scheduleFrame() }
+    /**
+     * New state: apply right away on the main thread instead of waiting for
+     * the next frame callback. The windows' draws then go out with the very
+     * next vsync traversal; a new box (appearance/scene guard, fresh
+     * detection) costs one hop + one vsync, not two. Motion continues from
+     * Choreographer frame callbacks.
+     */
+    private val applyNew = Runnable {
+        if (released) return@Runnable
+        val t0 = System.nanoTime()
+        val s = state
+        if (s != null && s.publishedNs != lastAppliedPublish) {
+            lastAppliedPublish = s.publishedNs
+            hopMsEma = ema(hopMsEma, (t0 - s.publishedNs) / 1e6f)
+        }
+        val moving = apply(t0)
+        applyMsEma = ema(applyMsEma, (System.nanoTime() - t0) / 1e6f)
+        updateRates(t0)
+        if (moving) scheduleFrame()
+    }
+    private var lastAppliedPublish = 0L
 
-    /** Thread-safe: hand over a new state; applied on the next vsync. */
+    /** Thread-safe: hand over a new state; applied immediately on main. */
     fun submit(s: RenderState) {
         state = s
-        main.postAtFrontOfQueue(schedule)
+        main.removeCallbacks(applyNew) // only the newest state matters
+        main.postAtFrontOfQueue(applyNew)
     }
 
     private fun scheduleFrame() {
@@ -118,14 +140,8 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
         frameScheduled = false
         if (released) return
         val t0 = System.nanoTime()
-        val s = state
-        if (s != null) {
-            val d = (t0 - s.publishedNs) / 1e6f
-            submitToFrameMsEma = ema(submitToFrameMsEma, d)
-        }
         val moving = apply(frameTimeNanos)
-        val ms = (System.nanoTime() - t0) / 1e6f
-        applyMsEma = ema(applyMsEma, ms)
+        applyMsEma = ema(applyMsEma, (System.nanoTime() - t0) / 1e6f)
         updateRates(t0)
         if (moving) scheduleFrame()
     }
@@ -352,7 +368,7 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
     fun release() {
         released = true
         choreographer.removeFrameCallback(this)
-        main.removeCallbacks(schedule)
+        main.removeCallbacks(applyNew)
         for (sl in slots) try { wm.removeViewImmediate(sl.view) } catch (_: Exception) {}
         slots.clear()
         hud?.let { try { wm.removeViewImmediate(it) } catch (_: Exception) {} }

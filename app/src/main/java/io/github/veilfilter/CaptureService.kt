@@ -132,7 +132,7 @@ class CaptureService : Service() {
         val backendId = AppSettings.backend
         val soc = "${Build.SOC_MANUFACTURER} ${Build.SOC_MODEL}".trim()
         val p = Pipeline(
-            detectorFactory = { Backends.create(applicationContext, backendId, model) },
+            detectorFactory = { status -> DetectorFactory.create(applicationContext, backendId, model, status) },
             model = model,
             renderer = r,
             probe = probe,
@@ -146,6 +146,7 @@ class CaptureService : Service() {
         )
         p.sceneGuardEnabled = AppSettings.sceneGuard
         p.csvLog = AppSettings.csvLog
+        p.appearanceGuardEnabled = AppSettings.appearanceGuard
         p.vsyncMs = vsync
         p.extraLeadMs = AppSettings.extraLeadMs.toFloat()
         pipeline = p
@@ -181,6 +182,7 @@ class CaptureService : Service() {
             // keep settings live
             p.sceneGuardEnabled = AppSettings.sceneGuard
             p.csvLog = AppSettings.csvLog
+            p.appearanceGuardEnabled = AppSettings.appearanceGuard
             p.extraLeadMs = AppSettings.extraLeadMs.toFloat()
             p.onImageAvailable(rd)
         }, worker)
@@ -199,7 +201,12 @@ class CaptureService : Service() {
         val db = displayBounds()
         val cw = if (contentW > 0) contentW else db.width()
         val ch = if (contentH > 0) contentH else db.height()
-        val s = min(1f, TARGET_SHORT_SIDE / min(cw, ch).toFloat())
+        // Capture size follows the model: the detector only sees `px` across the
+        // long side, so ~3x that (960 for 320) loses nothing for detection while
+        // cutting deliver/copy cost vs 540x1170 (~-30% pixels). Short side >= 360.
+        val long = CAPTURE_LONG_PER_INPUT * AppSettings.modelSize.px
+        var s = min(1f, long / max(cw, ch).toFloat())
+        s = min(1f, max(s, MIN_SHORT_SIDE / min(cw, ch).toFloat()))
         capW = max(2, (cw * s / 2f).roundToInt() * 2)
         capH = max(2, (ch * s / 2f).roundToInt() * 2)
 
@@ -345,7 +352,8 @@ class CaptureService : Service() {
         const val EXTRA_DATA = "data"
         private const val CHANNEL = "protection"
         private const val NOTIF_ID = 1
-        const val TARGET_SHORT_SIDE = 540f
+        const val CAPTURE_LONG_PER_INPUT = 3f
+        const val MIN_SHORT_SIDE = 360f
         const val PREWARM_WINDOWS = 6
 
         fun start(ctx: Context, code: Int, data: Intent) {

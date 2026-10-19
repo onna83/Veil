@@ -26,7 +26,7 @@ import kotlin.math.min
  * N+1 overlaps inference of frame N.
  */
 class Pipeline(
-    private val detectorFactory: () -> Detector,
+    private val detectorFactory: (status: (String) -> Unit) -> Detector,
     private val model: ModelSize,
     private val renderer: OverlayRenderer,
     private val probe: CaptureProbe,
@@ -40,6 +40,8 @@ class Pipeline(
     private val tracker = Tracker()
     private val guard = SceneGuard()
     private val shift = ShiftEstimator()
+    private val appear = AppearanceGuard()
+    private val trackRects = FloatArray(4 * 20)
     private val classMask = Labels.mask(Labels.CENSORED_NAMES)
 
     private var frame = ByteArray(0)
@@ -78,6 +80,7 @@ class Pipeline(
     private val toRemove = ArrayList<Tracker.Track>()
 
     @Volatile var sceneGuardEnabled = true
+    @Volatile var appearanceGuardEnabled = true
     @Volatile var csvLog = false
     @Volatile var paused = false
     /** display refresh period, ms */
@@ -98,6 +101,7 @@ class Pipeline(
         var w = 0
         var h = 0
         var readyNs = 0L
+        var skin = FloatArray(0)
     }
 
     private val lock = Object()
@@ -113,6 +117,7 @@ class Pipeline(
         var count = 0
         var frameId = 0L; var tCap = 0L; var cumX = 0.0; var cumY = 0.0; var gen = 0; var cut = false
         var queueMs = 0f; var inferMs = 0f; var decodeMs = 0f; var doneNs = 0L
+        var skin = FloatArray(0)
     }
 
     // ---------------- metrics ----------------
@@ -121,6 +126,7 @@ class Pipeline(
     private val mShift = Ema(); private val mGuard = Ema(); private val mAnalyze = Ema(); private val mPre = Ema()
     private val mQueue = Ema(); private val mInfer = Ema(); private val mDecode = Ema(); private val mPost = Ema()
     private val mDetAge = Ema()
+    private val mAppear = Ema()
     @Volatile private var inferMsShared = 16f
     private var capFrames = 0
     private var detFrames = 0
@@ -155,6 +161,7 @@ class Pipeline(
         pix.clear()
         guard.reset()
         shift.reset()
+        appear.reset()
         cutGuard = null
         pendingCut = false
         haveDet = false
@@ -211,7 +218,7 @@ class Pipeline(
         nExcl = 0
         if (selfVisible) {
             nExcl = renderer.drawnRects(excl, excl.size / 4 - 1)
-            val lat = if (probe.latencyMs > 0) probe.latencyMs else 2 * vsyncMs
+            val lat = if (probeLatency() > 0) probeLatency() else 2 * vsyncMs
             val dilX = abs(gvx) * (lat + vsyncMs) + 4f
             val dilY = abs(gvy) * (lat + vsyncMs) + 4f
             for (k in 0 until nExcl) {
@@ -232,6 +239,7 @@ class Pipeline(
             if (dx != 0f || dy != 0f) {
                 cumX += dx; cumY += dy
                 tracker.applyShift(dx, dy)
+                appear.applyShift(dx, dy)
             }
             if (interval in 1f..200f) {
                 // fast response: scroll start/stop must not lag the page
@@ -259,6 +267,19 @@ class Pipeline(
         }
         val t3 = System.nanoTime()
 
+        // 3b. appearance guard: new skin-coloured content since the detector last looked
+        if (appearanceGuardEnabled) {
+            var nt = 0
+            for (tr in tracker.tracks) {
+                if (nt >= trackRects.size / 4) break
+                trackRects[4 * nt] = tr.x1; trackRects[4 * nt + 1] = tr.y1
+                trackRects[4 * nt + 2] = tr.x2; trackRects[4 * nt + 3] = tr.y2
+                nt++
+            }
+            appear.analyze(frame, w, h, stride, excl, nExcl, trackRects, nt, cumX, cumY, frameId, tCap)
+            mAppear.add(appear.lastMs)
+        } else if (appear.boxes.isNotEmpty()) appear.reset()
+
         // 4. capture probe (are we captured? draw->capture latency)
         if (mode != CaptureProbe.Mode.SINGLE_APP) {
             val pr = OverlayRenderer.probeRect(w, h)
@@ -274,7 +295,7 @@ class Pipeline(
 
         // 5. occlusion (full screen only) + ring re-validation + off-frame removal
         toRemove.clear()
-        val probeLat = if (probe.latencyMs > 0) probe.latencyMs else 3 * vsyncMs
+        val probeLat = if (probe.latencyMs > 0) probe.latencyMs else 3 * vsyncMs // only used in FULL_SCREEN
         for (tr in tracker.tracks) {
             if (tr.x2 < 0 || tr.y2 < 0 || tr.x1 > w || tr.y1 > h) { toRemove.add(tr); continue }
             if (selfVisible) {
@@ -319,7 +340,8 @@ class Pipeline(
         if (csvLog) {
             Log.i(CSV, "F,$frameId,$tCap,${f1(interval)},${f1(deliverMs)},${f2(copyMs)},${f2((t1 - t0) / 1e6f)}," +
                 "${f2((t3 - t2) / 1e6f)},${f2((t4 - t0) / 1e6f)},${f2((t5 - t4) / 1e6f)},${f1(dx)},${f1(dy)}," +
-                "${if (shift.confident) 1 else 0},${tracker.tracks.size},${mode.name},${if (cut) 1 else 0}")
+                "${if (shift.confident) 1 else 0},${tracker.tracks.size},${mode.name},${if (cut) 1 else 0}," +
+                "${f2(appear.lastMs)},${appear.boxes.size}")
         }
         maybeStats(tCap)
     }
@@ -336,8 +358,12 @@ class Pipeline(
      * full-screen mode, assumed 2 vsyncs otherwise), half a vsync for
      * display -> capture timestamp, and the user's extra lead setting.
      */
+    private fun probeLatency(): Float =
+        if (probe.mode == CaptureProbe.Mode.FULL_SCREEN) probe.latencyMs else -1f
+
     private fun updateLead() {
-        val l = probe.latencyMs
+        // the probe can be fooled by dark content before single-app is confirmed; only trust it in full screen
+        val l = probeLatency()
         val toScreen = if (l > 0) max(l, vsyncMs) else 2 * vsyncMs
         renderer.leadMs = min(toScreen + 0.5f * vsyncMs + extraLeadMs, 100f)
         renderer.vsyncMs = vsyncMs
@@ -358,6 +384,7 @@ class Pipeline(
         slot.gen = generation; slot.w = fw; slot.h = fh
         slot.cut = pendingCut
         pendingCut = false
+        slot.skin = appear.snapshotInto(slot.skin)
         slot.readyNs = System.nanoTime()
         synchronized(lock) { slot.state = READY; lock.notifyAll() }
     }
@@ -387,6 +414,7 @@ class Pipeline(
                 excl, nExcl, cumX, cumY,
             )
         }
+        appear.onDetected(r.skin, r.cumX, r.cumY, r.frameId, now)
         lastDetCumX = r.cumX; lastDetCumY = r.cumY; haveDet = true
         if (cutGuard != null && r.frameId >= cutGuardFrame) cutGuard = null
         publish(now, buildScrollGuard(now, probe.mode, mInterval.v))
@@ -497,6 +525,16 @@ class Pipeline(
         if (pix.size > tmpIds.size) pix.keys.retainAll(tmpIds)
         cutGuard?.let { out.add(it) }
         scrollGuard?.let { out.add(it) }
+        for (b in appear.boxes) {
+            val x1 = max(b.x1, 0f); val y1 = max(b.y1, 0f); val x2 = min(b.x2, w); val y2 = min(b.y2, h)
+            if (x2 - x1 < 1f || y2 - y1 < 1f) continue
+            val long = max(x2 - x1, y2 - y1)
+            val cols = Pixelator.blocksFor(x2 - x1, long)
+            val rows = Pixelator.blocksFor(y2 - y1, long)
+            val c = IntArray(cols * rows)
+            Pixelator.sampleBlocks(frame, fw, fh, stride, x1, y1, x2, y2, cols, rows, c)
+            out.add(CensorBox(APPEAR_ID_BASE - b.id, x1, y1, x2, y2, gvx, gvy, tCap, cols, rows, c))
+        }
         renderer.submit(RenderState(fw, fh, out, tCap, System.nanoTime()))
     }
 
@@ -505,7 +543,7 @@ class Pipeline(
 
     private fun inferLoop() {
         try { Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY) } catch (_: Throwable) {}
-        val det = try { detectorFactory() } catch (t: Throwable) {
+        val det = try { detectorFactory { st -> backendName = "auto: $st" } } catch (t: Throwable) {
             Log.e(TAG, "detector init failed", t)
             onFatal("Model failed to load: ${t.message}")
             return
@@ -538,6 +576,7 @@ class Pipeline(
                 System.arraycopy(decoder.score, 0, r.score, 0, n); System.arraycopy(decoder.cls, 0, r.cls, 0, n)
                 r.frameId = slot.frameId; r.tCap = slot.tCap; r.cumX = slot.cumX; r.cumY = slot.cumY
                 r.gen = slot.gen; r.cut = slot.cut
+                r.skin = slot.skin.copyOf()
                 r.queueMs = (tStart - slot.readyNs) / 1e6f
                 r.inferMs = (tInf - tStart) / 1e6f
                 r.decodeMs = (System.nanoTime() - tInf) / 1e6f
@@ -572,30 +611,38 @@ class Pipeline(
             CaptureProbe.Mode.FULL_SCREEN -> "FULL SCREEN"
             CaptureProbe.Mode.UNKNOWN -> "detecting…"
         }
-        val pl = probe.latencyMs
+        val pl = probeLatency()
         // latency chain estimates (ms)
         val toScreen = if (pl > 0) pl else 2 * vsyncMs                   // overlay draw -> on screen
         val dispToCap = vsyncMs * 0.5f + mDeliver.v                         // screen -> frame in our hands
-        val trackPath = dispToCap + mCopy.v + mAnalyze.v + r.submitToFrameMsEma + r.applyMsEma + toScreen
-        val newPath = dispToCap + mCopy.v + mAnalyze.v + mPre.v + mQueue.v + mInfer.v + mDecode.v + mPost.v +
-            r.submitToFrameMsEma + r.applyMsEma + toScreen
+        val overlay = r.hopMsEma + r.applyMsEma + 0.5f * vsyncMs // + wait for the next traversal
+        val trackPath = dispToCap + mCopy.v + mAnalyze.v + overlay + toScreen
+        val appearPath = trackPath // guard boxes are published in the same pass as tracks
+        val detPath = dispToCap + mCopy.v + mAnalyze.v + mPre.v + mQueue.v + mInfer.v + mDecode.v + mPost.v +
+            overlay + toScreen
+        val ag = if (!appearanceGuardEnabled) "off" else String.format(
+            java.util.Locale.US, "%.2f ms, boxes %d, new cells %d, fired %d",
+            mAppear.v, appear.boxes.size, appear.lastNewCells, appear.triggers,
+        )
         val hud = String.format(
             java.util.Locale.US,
             "%s | %s\ncapture: %s | %.0f x %d\n" +
                 "cap %.1f fps (int %.1f) deliver %.1f copy %.2f\n" +
                 "shift %.2f guard %.2f analyze+publish %.2f pre %.2f\n" +
+                "appear guard: %s\n" +
                 "det %.1f fps: queue %.1f infer %.1f decode %.2f post %.2f\n" +
-                "overlay: frame-wait %.1f apply %.2f layout %.2f relayout %.0f/s draw %.0f/s\n" +
+                "overlay: hop %.1f apply %.2f layout %.2f relayout %.0f/s draw %.0f/s\n" +
                 "probe draw→cap %s lead %.0f vsync %.1f\n" +
-                "e2e est: track path %.0f ms, new object %.0f ms\n" +
+                "e2e est: tracked %.0f | new obj: guard %.0f, detector %.0f ms\n" +
                 "scroll %+.1f,%+.1f px/f %s | tracks %d (occ %d) ring-drop %d",
             backendName, socInfo, mode, fw.toFloat(), fh,
             capFps, mInterval.v, mDeliver.v, mCopy.v,
             mShift.v, mGuard.v, mAnalyze.v, mPre.v,
+            ag,
             detFps, mQueue.v, mInfer.v, mDecode.v, mPost.v,
-            r.submitToFrameMsEma, r.applyMsEma, r.layoutMsEma, r.relayoutsPerSec, r.drawsPerSec,
+            r.hopMsEma, r.applyMsEma, r.layoutMsEma, r.relayoutsPerSec, r.drawsPerSec,
             if (pl > 0) String.format(java.util.Locale.US, "%.0f ms", pl) else "n/a", r.leadMs, vsyncMs,
-            trackPath, newPath,
+            trackPath, appearPath, detPath,
             lastDx, lastDy, if (shift.confident) "ok" else "?", tracker.tracks.size, occ, ringDrops,
         )
         onHud(hud)
@@ -604,7 +651,7 @@ class Pipeline(
     companion object {
         private const val TAG = "VeilPipeline"
         const val CSV = "VeilCSV"
-        const val CSV_HEADER_F = "F,frame,tCapMs,intervalMs,deliverMs,copyMs,shiftMs,guardMs,analyzeMs,preMs,dx,dy,confident,tracks,mode,cut"
+        const val CSV_HEADER_F = "F,frame,tCapMs,intervalMs,deliverMs,copyMs,shiftMs,guardMs,analyzeMs,preMs,dx,dy,confident,tracks,mode,cut,appearMs,appearBoxes"
         const val CSV_HEADER_D = "D,frame,tCapMs,queueMs,inferMs,decodeMs,postMs,ageMs,dets,compX,compY"
         const val OCCLUSION_DIFF = 10f
         const val PAD = 0.10f

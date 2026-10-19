@@ -43,6 +43,9 @@ class MainActivity : Activity() {
         hud.isChecked = AppSettings.debugHud
         guard.setOnCheckedChangeListener { _, v -> AppSettings.setSceneGuard(this, v) }
         hud.setOnCheckedChangeListener { _, v -> AppSettings.setDebugHud(this, v) }
+        val appear = findViewById<Switch>(R.id.appearance_guard)
+        appear.isChecked = AppSettings.appearanceGuard
+        appear.setOnCheckedChangeListener { _, v -> AppSettings.setAppearanceGuard(this, v) }
         val csv = findViewById<Switch>(R.id.csv_log)
         csv.isChecked = AppSettings.csvLog
         csv.setOnCheckedChangeListener { _, v -> AppSettings.setCsvLog(this, v) }
@@ -192,38 +195,32 @@ class MainActivity : Activity() {
         Thread({
             val sb = StringBuilder()
             sb.append("${Backends.RUNTIME}, ${model.px} px, ${android.os.Build.SOC_MANUFACTURER} ${android.os.Build.SOC_MODEL}\n")
-            Backends.strict = true
-            try {
-                for (o in Backends.options) {
-                    if (o.id == "auto") continue
-                    val line = try {
-                        val t0 = System.nanoTime()
-                        val d = Backends.create(app, o.id, model)
-                        val initMs = (System.nanoTime() - t0) / 1e6
-                        try {
-                            val input = FloatArray(3 * model.px * model.px) { ((it * 31) % 255) / 255f }
-                            repeat(5) { d.run(input) }
-                            val times = DoubleArray(30)
-                            for (i in times.indices) {
-                                val a = System.nanoTime()
-                                d.run(input)
-                                times[i] = (System.nanoTime() - a) / 1e6
-                            }
-                            times.sort()
-                            String.format(
-                                java.util.Locale.US, "%-14s median %5.1f ms  p90 %5.1f  init %4.0f ms  [%s]",
-                                o.id, times[15], times[26], initMs, d.backend,
-                            )
-                        } finally { d.close() }
-                    } catch (t: Throwable) {
-                        "${o.id}: failed (${t.javaClass.simpleName}: ${t.message?.take(80)})"
-                    }
-                    sb.append(line).append('\n')
-                    val partial = sb.toString()
-                    runOnUiThread { benchOut.text = partial }
+            var bestId = ""
+            var bestMs = Double.MAX_VALUE
+            for (o in Backends.options) {
+                if (o.id == "auto") continue
+                val line = try {
+                    val t0 = System.nanoTime()
+                    val d = Backends.createExact(app, o.id, model)
+                    val initMs = (System.nanoTime() - t0) / 1e6
+                    try {
+                        val times = DetectorFactory.time(d, 5, 30)
+                        if (times[15] < bestMs) { bestMs = times[15]; bestId = o.id }
+                        String.format(
+                            java.util.Locale.US, "%-7s median %5.1f ms  p90 %5.1f  init %4.0f ms  [%s]",
+                            o.id, times[15], times[26], initMs, d.backend,
+                        )
+                    } finally { d.close() }
+                } catch (t: Throwable) {
+                    "${o.id}: failed (${t.javaClass.simpleName}: ${t.message?.take(80)})"
                 }
-            } finally {
-                Backends.strict = false
+                sb.append(line).append('\n')
+                val partial = sb.toString()
+                runOnUiThread { benchOut.text = partial }
+            }
+            if (bestId.isNotEmpty()) {
+                DetectorFactory.remember(app, model, bestId, bestMs)
+                sb.append("Auto will use: $bestId\n")
             }
             val text = sb.toString()
             android.util.Log.i("VeilBench", text)

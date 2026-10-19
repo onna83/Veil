@@ -36,3 +36,5 @@ class DrawnBox(
 
 const val GUARD_ID = -1
 const val SCROLL_GUARD_ID = -2
+/** appearance-guard box k gets id APPEAR_ID_BASE - k */
+const val APPEAR_ID_BASE = -100

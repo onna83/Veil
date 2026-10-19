@@ -1,7 +1,6 @@
 package io.github.veilfilter
 
 import android.content.Context
-import android.util.Log
 import com.google.ai.edge.litert.Accelerator
 import com.google.ai.edge.litert.CompiledModel
 import com.google.ai.edge.litert.Environment
@@ -15,7 +14,6 @@ import com.google.ai.edge.litert.TensorBuffer
  */
 object Backends {
     const val RUNTIME = "LiteRT 2.3 (CompiledModel)"
-    private const val TAG = "VeilDetector"
 
     val options = listOf(
         BackendOption("auto", "Auto (GPU, fall back to CPU)"),
@@ -24,7 +22,6 @@ object Backends {
         BackendOption("cpu", "CPU - XNNPACK"),
     )
 
-    @Volatile var strict = false
     private var env: Environment? = null
 
     private class Cm(
@@ -84,18 +81,14 @@ object Backends {
         return d
     }
 
-    fun create(ctx: Context, id: String, size: ModelSize): Detector {
-        if (id != "cpu") {
-            val b = when (id) {
-                "gpu_cl" -> CompiledModel.GpuOptions.Backend.OPENCL
-                "gpu_gl" -> CompiledModel.GpuOptions.Backend.OPENGL
-                else -> CompiledModel.GpuOptions.Backend.AUTOMATIC
-            }
-            try { return gpu(ctx, size, b) } catch (t: Throwable) {
-                Log.w(TAG, "GPU backend '$id' failed, falling back to CPU", t)
-                if (id != "auto" && strict) throw t
-            }
-        }
-        return cpu(ctx, size)
+    val autoCandidates = listOf("gpu_cl", "gpu_gl", "cpu")
+
+    /** Create exactly this backend (no fallback); throws if it cannot run here. */
+    fun createExact(ctx: Context, id: String, size: ModelSize): Detector = when (id) {
+        "gpu_cl" -> gpu(ctx, size, CompiledModel.GpuOptions.Backend.OPENCL)
+        "gpu_gl" -> gpu(ctx, size, CompiledModel.GpuOptions.Backend.OPENGL)
+        "gpu" -> gpu(ctx, size, CompiledModel.GpuOptions.Backend.AUTOMATIC)
+        "cpu" -> cpu(ctx, size)
+        else -> error("unknown backend $id")
     }
 }

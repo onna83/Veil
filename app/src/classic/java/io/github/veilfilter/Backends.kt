@@ -1,7 +1,6 @@
 package io.github.veilfilter
 
 import android.content.Context
-import android.util.Log
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
@@ -19,7 +18,6 @@ import java.nio.channels.FileChannel
  */
 object Backends {
     const val RUNTIME = "LiteRT 1.4 (GPU delegate)"
-    private const val TAG = "VeilDetector"
 
     val options = listOf(
         BackendOption("auto", "Auto (GPU, fall back to CPU)"),
@@ -98,23 +96,18 @@ object Backends {
         return d
     }
 
-    /** Create the requested backend; "auto" and failing GPU options fall back to CPU. */
-    fun create(ctx: Context, id: String, model: ModelSize): Detector {
-        val buf = load(ctx, model.asset)
-        val force = when (id) {
-            "gpu_cl" -> GpuDelegateFactory.Options.GpuBackend.OPENCL
-            "gpu_gl" -> GpuDelegateFactory.Options.GpuBackend.OPENGL
-            else -> null
-        }
-        if (id != "cpu") {
-            try { return gpu(ctx, model, buf, force) } catch (t: Throwable) {
-                Log.w(TAG, "GPU backend '$id' failed, falling back to CPU", t)
-                if (id != "auto" && strict) throw t
-            }
-        }
-        return cpu(model, buf)
-    }
+    /** Backends tried by the Auto startup benchmark, in order. */
+    val autoCandidates = listOf("gpu_cl", "gpu_gl", "cpu")
 
-    /** Benchmark mode sets this so a failing option reports an error instead of CPU numbers. */
-    @Volatile var strict = false
+    /** Create exactly this backend (no fallback); throws if it cannot run here. */
+    fun createExact(ctx: Context, id: String, model: ModelSize): Detector {
+        val buf = load(ctx, model.asset)
+        return when (id) {
+            "gpu_cl" -> gpu(ctx, model, buf, GpuDelegateFactory.Options.GpuBackend.OPENCL)
+            "gpu_gl" -> gpu(ctx, model, buf, GpuDelegateFactory.Options.GpuBackend.OPENGL)
+            "gpu" -> gpu(ctx, model, buf, null)
+            "cpu" -> cpu(model, buf)
+            else -> error("unknown backend $id")
+        }
+    }
 }

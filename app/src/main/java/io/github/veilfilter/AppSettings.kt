@@ -11,9 +11,11 @@ object AppSettings {
     private const val KEY_BACKEND = "backend"
     private const val KEY_FAST = "fast256"
     private const val KEY_LEAD = "extra_lead_ms"
+    private const val KEY_APPEAR = "appearance_guard"
 
     @Volatile var sceneGuard = true; private set
     @Volatile var debugHud = false; private set
+    @Volatile var appearanceGuard = true; private set
     @Volatile var csvLog = false; private set
     @Volatile var backend = "auto"; private set
     @Volatile var fast256 = false; private set
@@ -28,6 +30,7 @@ object AppSettings {
         val p = prefs(ctx)
         sceneGuard = p.getBoolean(KEY_GUARD, true)
         debugHud = p.getBoolean(KEY_HUD, false)
+        appearanceGuard = p.getBoolean(KEY_APPEAR, true)
         csvLog = p.getBoolean(KEY_CSV, false)
         backend = p.getString(KEY_BACKEND, "auto") ?: "auto"
         if (Backends.options.none { it.id == backend }) backend = "auto"
@@ -39,6 +42,7 @@ object AppSettings {
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     fun setSceneGuard(ctx: Context, v: Boolean) { sceneGuard = v; prefs(ctx).edit().putBoolean(KEY_GUARD, v).apply() }
+    fun setAppearanceGuard(ctx: Context, v: Boolean) { appearanceGuard = v; prefs(ctx).edit().putBoolean(KEY_APPEAR, v).apply() }
     fun setDebugHud(ctx: Context, v: Boolean) { debugHud = v; prefs(ctx).edit().putBoolean(KEY_HUD, v).apply() }
     fun setCsvLog(ctx: Context, v: Boolean) { csvLog = v; prefs(ctx).edit().putBoolean(KEY_CSV, v).apply() }
     fun setBackend(ctx: Context, v: String) { backend = v; prefs(ctx).edit().putString(KEY_BACKEND, v).apply() }
