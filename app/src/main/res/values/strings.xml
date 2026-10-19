@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">Veil</string>
+    <string name="tagline">On-device nudity filter. Nothing leaves your phone.</string>
+    <string name="start_protection">Start protection</string>
+    <string name="stop_protection">Stop</string>
+    <string name="stop">Stop</string>
+    <string name="grant_overlay">Allow display over other apps</string>
+    <string name="grant_notifications">Allow notifications (for the Stop button)</string>
+    <string name="scene_guard">Scene-change guard (pixelate on sudden cuts / fast scroll)</string>
+    <string name="debug_hud">Debug HUD (detector ms, FPS, latency)</string>
+    <string name="tip">Tip: in the capture dialog choose \"A single app\" and pick the app you want filtered. Then Veil\'s own censor boxes are not captured, which gives the most stable and fastest filtering. \"Entire screen\" works too but is less reliable.</string>
+    <string name="limits">Apps that block screenshots (incognito tabs, Netflix, banking) appear black to Veil and cannot be filtered. On Android 15+ protection stops when the screen locks; start it again after unlocking.</string>
+    <string name="status_running">Protection is ON</string>
+    <string name="status_stopped">Protection is off</string>
+    <string name="status_need_overlay">Veil needs permission to display over other apps.</string>
+    <string name="status_error">Stopped: %1$s</string>
+    <string name="consent_denied">Screen capture was not allowed</string>
+    <string name="notif_channel">Protection</string>
+    <string name="notif_title">Veil is filtering</string>
+    <string name="notif_text">Tap Stop to end protection</string>
+</resources>

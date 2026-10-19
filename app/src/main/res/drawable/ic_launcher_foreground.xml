@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Veil launcher icon (original): an eye whose pupil is a 3x3 pixelated grid. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- eye outline -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M24,54 C34,38 44,32 54,32 C64,32 74,38 84,54 C74,70 64,76 54,76 C44,76 34,70 24,54 Z" />
+    <path
+        android:fillColor="#2E2A5C"
+        android:pathData="M30,54 C38,42 46,37 54,37 C62,37 70,42 78,54 C70,66 62,71 54,71 C46,71 38,66 30,54 Z" />
+    <!-- pixelated pupil -->
+    <path android:fillColor="#8F83FF" android:pathData="M42,42h8v8h-8z" />
+    <path android:fillColor="#B9B2FF" android:pathData="M50,42h8v8h-8z" />
+    <path android:fillColor="#6D5FF0" android:pathData="M58,42h8v8h-8z" />
+    <path android:fillColor="#B9B2FF" android:pathData="M42,50h8v8h-8z" />
+    <path android:fillColor="#5B4BDB" android:pathData="M50,50h8v8h-8z" />
+    <path android:fillColor="#8F83FF" android:pathData="M58,50h8v8h-8z" />
+    <path android:fillColor="#6D5FF0" android:pathData="M42,58h8v8h-8z" />
+    <path android:fillColor="#8F83FF" android:pathData="M50,58h8v8h-8z" />
+    <path android:fillColor="#B9B2FF" android:pathData="M58,58h8v8h-8z" />
+</vector>
