@@ -147,6 +147,8 @@ class CaptureService : Service() {
         p.sceneGuardEnabled = AppSettings.sceneGuard
         p.csvLog = AppSettings.csvLog
         p.appearanceGuardEnabled = AppSettings.appearanceGuard
+        p.scrollGuardEnabled = AppSettings.scrollGuard
+        p.gridBoostEnabled = AppSettings.gridBoost
         p.vsyncMs = vsync
         p.extraLeadMs = AppSettings.extraLeadMs.toFloat()
         pipeline = p
@@ -183,6 +185,8 @@ class CaptureService : Service() {
             p.sceneGuardEnabled = AppSettings.sceneGuard
             p.csvLog = AppSettings.csvLog
             p.appearanceGuardEnabled = AppSettings.appearanceGuard
+            p.scrollGuardEnabled = AppSettings.scrollGuard
+            p.gridBoostEnabled = AppSettings.gridBoost
             p.extraLeadMs = AppSettings.extraLeadMs.toFloat()
             p.onImageAvailable(rd)
         }, worker)
@@ -204,7 +208,8 @@ class CaptureService : Service() {
         // Capture size follows the model: the detector only sees `px` across the
         // long side, so ~3x that (960 for 320) loses nothing for detection while
         // cutting deliver/copy cost vs 540x1170 (~-30% pixels). Short side >= 360.
-        val long = CAPTURE_LONG_PER_INPUT * AppSettings.modelSize.px
+        // grid boost: 4x input (1280 for 320) so 2-across tiles get ~1:1 source pixels
+        val long = (if (AppSettings.gridBoost) CAPTURE_LONG_PER_INPUT_GRID else CAPTURE_LONG_PER_INPUT) * AppSettings.modelSize.px
         var s = min(1f, long / max(cw, ch).toFloat())
         s = min(1f, max(s, MIN_SHORT_SIDE / min(cw, ch).toFloat()))
         capW = max(2, (cw * s / 2f).roundToInt() * 2)
@@ -353,6 +358,7 @@ class CaptureService : Service() {
         private const val CHANNEL = "protection"
         private const val NOTIF_ID = 1
         const val CAPTURE_LONG_PER_INPUT = 3f
+        const val CAPTURE_LONG_PER_INPUT_GRID = 4f
         const val MIN_SHORT_SIDE = 360f
         const val PREWARM_WINDOWS = 6
 

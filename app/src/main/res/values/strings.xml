@@ -5,8 +5,10 @@
     <string name="stop">Stop</string>
     <string name="grant_overlay">Allow display over other apps</string>
     <string name="grant_notifications">Allow notifications (for the Stop button)</string>
-    <string name="scene_guard">Scene-change &amp; scroll guard (pixelate sudden cuts and newly scrolled-in content until checked)</string>
-    <string name="appearance_guard">Appearance guard: instantly pixelate newly appearing skin-coloured areas until the detector has checked them</string>
+    <string name="scene_guard">Scene-cut guard (pixelate on sudden video cuts until checked; never while scrolling)</string>
+    <string name="scroll_guard">Scroll-entry guard: pre-emptively pixelate content scrolling in at the edge until checked</string>
+    <string name="grid_boost">Small images / grid boost (extra detailed passes for thumbnails in feeds and galleries; applies next start)</string>
+    <string name="appearance_guard">Appearance guard: instantly pixelate newly appearing skin-coloured areas until checked (not while scrolling)</string>
     <string name="debug_hud">Debug HUD (per-stage timings, latency estimate)</string>
     <string name="csv_log">Log per-frame timings to logcat (tag VeilCSV)</string>
     <string name="recommend_title">Recommended: choose \"A single app\"</string>

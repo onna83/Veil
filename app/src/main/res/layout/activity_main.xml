@@ -69,6 +69,13 @@
             android:text="@string/scene_guard" />
 
         <Switch
+            android:id="@+id/grid_boost"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="48dp"
+            android:text="@string/grid_boost" />
+
+        <Switch
             android:id="@+id/appearance_guard"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -92,6 +99,13 @@
             android:layout_marginTop="16dp"
             android:text="@string/advanced"
             android:textStyle="bold" />
+
+        <Switch
+            android:id="@+id/scroll_guard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="48dp"
+            android:text="@string/scroll_guard" />
 
         <Switch
             android:id="@+id/debug_hud"

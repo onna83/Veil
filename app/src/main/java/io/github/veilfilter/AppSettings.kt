@@ -12,10 +12,14 @@ object AppSettings {
     private const val KEY_FAST = "fast256"
     private const val KEY_LEAD = "extra_lead_ms"
     private const val KEY_APPEAR = "appearance_guard"
+    private const val KEY_SCROLL = "scroll_guard"
+    private const val KEY_GRID = "grid_boost"
 
     @Volatile var sceneGuard = true; private set
     @Volatile var debugHud = false; private set
     @Volatile var appearanceGuard = true; private set
+    @Volatile var scrollGuard = false; private set
+    @Volatile var gridBoost = true; private set
     @Volatile var csvLog = false; private set
     @Volatile var backend = "auto"; private set
     @Volatile var fast256 = false; private set
@@ -31,6 +35,8 @@ object AppSettings {
         sceneGuard = p.getBoolean(KEY_GUARD, true)
         debugHud = p.getBoolean(KEY_HUD, false)
         appearanceGuard = p.getBoolean(KEY_APPEAR, true)
+        scrollGuard = p.getBoolean(KEY_SCROLL, false)
+        gridBoost = p.getBoolean(KEY_GRID, true)
         csvLog = p.getBoolean(KEY_CSV, false)
         backend = p.getString(KEY_BACKEND, "auto") ?: "auto"
         if (Backends.options.none { it.id == backend }) backend = "auto"
@@ -43,6 +49,8 @@ object AppSettings {
 
     fun setSceneGuard(ctx: Context, v: Boolean) { sceneGuard = v; prefs(ctx).edit().putBoolean(KEY_GUARD, v).apply() }
     fun setAppearanceGuard(ctx: Context, v: Boolean) { appearanceGuard = v; prefs(ctx).edit().putBoolean(KEY_APPEAR, v).apply() }
+    fun setScrollGuard(ctx: Context, v: Boolean) { scrollGuard = v; prefs(ctx).edit().putBoolean(KEY_SCROLL, v).apply() }
+    fun setGridBoost(ctx: Context, v: Boolean) { gridBoost = v; prefs(ctx).edit().putBoolean(KEY_GRID, v).apply() }
     fun setDebugHud(ctx: Context, v: Boolean) { debugHud = v; prefs(ctx).edit().putBoolean(KEY_HUD, v).apply() }
     fun setCsvLog(ctx: Context, v: Boolean) { csvLog = v; prefs(ctx).edit().putBoolean(KEY_CSV, v).apply() }
     fun setBackend(ctx: Context, v: String) { backend = v; prefs(ctx).edit().putString(KEY_BACKEND, v).apply() }

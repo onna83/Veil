@@ -64,7 +64,13 @@ class Preprocessor(val size: Int = 320, val nchw: Boolean = true) {
     /**
      * Fill [output] from the frame. Pixels outside the image (padding) are 0.
      */
-    fun process(src: ByteArray, w: Int, h: Int, rowStride: Int) {
+    fun process(src: ByteArray, w: Int, h: Int, rowStride: Int) = process(src, w, h, rowStride, 0)
+
+    /**
+     * Same, for a [w] x [h] region starting at byte offset [base] of the frame
+     * (base = y0 * rowStride + x0 * 4): used for tile passes.
+     */
+    fun process(src: ByteArray, w: Int, h: Int, rowStride: Int, base: Int) {
         if (w != srcW || h != srcH || rowStride != stride) setup(w, h, rowStride)
         val plane = size * size
         val out = output
@@ -75,8 +81,8 @@ class Preprocessor(val size: Int = 320, val nchw: Boolean = true) {
             val sy1 = y1[dy]
             val fy = wy[dy]
             // rows beyond the image are black padding
-            val row0 = sy0 * stride
-            val row1 = sy1 * stride
+            val row0 = base + sy0 * stride
+            val row1 = base + sy1 * stride
             val valid1y = sy1 < hh
             for (dx in 0 until outW) {
                 val sx0 = x0[dx]

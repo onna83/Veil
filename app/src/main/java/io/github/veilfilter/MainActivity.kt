@@ -46,6 +46,12 @@ class MainActivity : Activity() {
         val appear = findViewById<Switch>(R.id.appearance_guard)
         appear.isChecked = AppSettings.appearanceGuard
         appear.setOnCheckedChangeListener { _, v -> AppSettings.setAppearanceGuard(this, v) }
+        val grid = findViewById<Switch>(R.id.grid_boost)
+        grid.isChecked = AppSettings.gridBoost
+        grid.setOnCheckedChangeListener { _, v -> AppSettings.setGridBoost(this, v) }
+        val scrollG = findViewById<Switch>(R.id.scroll_guard)
+        scrollG.isChecked = AppSettings.scrollGuard
+        scrollG.setOnCheckedChangeListener { _, v -> AppSettings.setScrollGuard(this, v) }
         val csv = findViewById<Switch>(R.id.csv_log)
         csv.isChecked = AppSettings.csvLog
         csv.setOnCheckedChangeListener { _, v -> AppSettings.setCsvLog(this, v) }

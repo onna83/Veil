@@ -81,16 +81,38 @@ class AppearanceGuard(
      * cumulative scroll [cumX],[cumY]). It becomes the new reference, and boxes
      * triggered at or before [frameId] are released (after [minOnMs]).
      */
-    fun onDetected(grid: FloatArray, cumX: Double, cumY: Double, frameId: Long, nowMs: Long) {
+    fun onDetected(
+        grid: FloatArray, cumX: Double, cumY: Double, frameId: Long, nowMs: Long,
+        /** region the detector looked at (frame px of that frame); default whole frame */
+        rx1: Float = 0f, ry1: Float = 0f, rx2: Float = Float.MAX_VALUE, ry2: Float = Float.MAX_VALUE,
+    ) {
         if (grid.size != ref.size) return
-        System.arraycopy(grid, 0, ref, 0, grid.size)
-        refCumX = cumX; refCumY = cumY
-        refValid = true
+        val whole = rx1 <= 0f && ry1 <= 0f && rx2 >= w && ry2 >= h
+        if (whole || !refValid) {
+            System.arraycopy(grid, 0, ref, 0, grid.size)
+            refCumX = cumX; refCumY = cumY
+            refValid = true
+        } else {
+            // tile pass: only the cells it covered become "checked"; bring them into
+            // the reference's coordinate frame (the reference may be from another scroll offset)
+            val ox = ((refCumX - cumX) / cell).toFloat()
+            val oy = ((refCumY - cumY) / cell).toFloat()
+            for (j in 0 until rows) for (i in 0 until cols) {
+                val si = i - ox; val sj = j - oy           // cell of [grid] that is now at (i, j) in ref coords
+                val cx = (si + 0.5f) * cell; val cy = (sj + 0.5f) * cell
+                if (cx < rx1 || cx > rx2 || cy < ry1 || cy > ry2) continue
+                val gi = si.toInt(); val gj = sj.toInt()
+                if (gi < 0 || gj < 0 || gi >= cols || gj >= rows) continue
+                ref[j * cols + i] = grid[gj * cols + gi]
+            }
+        }
         // release a box once the detector has seen its content: either the
         // detected frame is at least as new as the box's last trigger, or the
         // current frame has nothing "new" left inside the box vs the new reference
+        val sx = (lastCumX - cumX).toFloat(); val sy = (lastCumY - cumY).toFloat()
         boxes.removeAll { b ->
-            nowMs - b.shownAt >= minOnMs && (b.lastTriggerFrame <= frameId || newCellsIn(b) < minCells)
+            val inside = whole || (b.x1 - sx >= rx1 && b.x2 - sx <= rx2 && b.y1 - sy >= ry1 && b.y2 - sy <= ry2)
+            nowMs - b.shownAt >= minOnMs && ((inside && b.lastTriggerFrame <= frameId) || newCellsIn(b) < minCells)
         }
     }
 
@@ -125,12 +147,20 @@ class AppearanceGuard(
         src: ByteArray, fw: Int, fh: Int, stride: Int,
         excl: FloatArray, nExcl: Int, tracks: FloatArray, nTracks: Int,
         cumX: Double, cumY: Double, frameId: Long, nowMs: Long,
+        /** false: only build the grid (e.g. while scrolling: no pre-emptive covering) */
+        trigger: Boolean = true,
     ) {
         val t0 = System.nanoTime()
         if (fw != w || fh != h || skin.isEmpty()) alloc(fw, fh)
         buildGrid(src, stride)
         mask(excl, nExcl)
         lastCumX = cumX; lastCumY = cumY
+        if (!trigger) {
+            boxes.clear()
+            lastNewCells = 0
+            lastMs = (System.nanoTime() - t0) / 1e6f
+            return
+        }
         // find new skin
         var nNew = 0
         val ox = ((cumX - refCumX) / cell).toFloat()

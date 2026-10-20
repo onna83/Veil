@@ -31,6 +31,12 @@ class Tracker(
     var occludedGraceMs: Long = 300,
     var smoothing: Float = 0.6f, // weight of the new measurement
     var maxExtrapolateMs: Long = 200,
+    /** residual speed (px/ms) above which a track counts as fast-moving */
+    var fastSpeed: Float = 0.25f,
+    /** fast tracks: match even weak detections (motion blur lowers scores) */
+    var fastKeepThreshold: Float = 0.12f,
+    /** fast tracks survive this long without a detection (blurred frames get missed) */
+    var fastMissTimeoutMs: Long = 800,
     val maxTracks: Int = 16,
 ) {
     class Track(val id: Int) {
@@ -48,6 +54,11 @@ class Tracker(
         var occludedSince = Long.MIN_VALUE / 2
         /** time of the last detector confirmation (match or birth) */
         var confirmedAt = Long.MIN_VALUE / 2
+        /** extra keep-alive (ms) for tracks found by tile passes, which revisit slowly */
+        var keepMs = 0L
+        fun speed() = kotlin.math.sqrt(vx * vx + vy * vy)
+        /** speed at the last detection (not damped while unobserved) */
+        var seenSpeed = 0f
         val ring = RingSignature()
 
         fun isOccluded(now: Long, graceMs: Long) = now - lastOccluded <= graceMs
@@ -99,6 +110,10 @@ class Tracker(
     fun update(
         n: Int, dx1: FloatArray, dy1: FloatArray, dx2: FloatArray, dy2: FloatArray,
         dScore: FloatArray, dCls: IntArray, now: Long, sceneCut: Boolean,
+        /** per detection: touches an interior tile edge (partial view); may be null */
+        clipped: BooleanArray? = null,
+        /** keep-alive to give tracks confirmed by this pass (tile passes), 0 = default */
+        keepMs: Long = 0L,
     ) {
         val nd = min(n, detUsed.size)
         val nt = min(tracks.size, trackUsed.size)
@@ -112,8 +127,11 @@ class Tracker(
             val py1 = tr.predictY1(now, maxExtrapolateMs)
             val px2 = tr.predictX2(now, maxExtrapolateMs)
             val py2 = tr.predictY2(now, maxExtrapolateMs)
+            val fast = tr.seenSpeed > fastSpeed
             for (i in 0 until nd) {
-                pairIou[j * 64 + i] = YoloDecoder.iou(px1, py1, px2, py2, dx1[i], dy1[i], dx2[i], dy2[i])
+                // weak detections only keep fast (blurred) tracks alive
+                pairIou[j * 64 + i] = if (dScore[i] < keepThreshold && !(fast && dScore[i] >= fastKeepThreshold)) 0f
+                else YoloDecoder.iou(px1, py1, px2, py2, dx1[i], dy1[i], dx2[i], dy2[i])
             }
         }
         // greedy: best pair first
@@ -131,7 +149,16 @@ class Tracker(
             if (bj < 0) break
             trackUsed[bj] = true
             detUsed[bi] = true
-            correct(tracks[bj], dx1[bi], dy1[bi], dx2[bi], dy2[bi], dScore[bi], dCls[bi], now)
+            val tr = tracks[bj]
+            if (clipped != null && clipped[bi]) {
+                // partial view at a tile edge: may grow the track, never shrink it
+                val d = tr.dt(now, maxExtrapolateMs)
+                correct(
+                    tr, min(dx1[bi], tr.x1 + tr.vx * d), min(dy1[bi], tr.y1 + tr.vy * d),
+                    max(dx2[bi], tr.x2 + tr.vx * d), max(dy2[bi], tr.y2 + tr.vy * d), dScore[bi], dCls[bi], now,
+                )
+            } else correct(tr, dx1[bi], dy1[bi], dx2[bi], dy2[bi], dScore[bi], dCls[bi], now)
+            if (keepMs > tr.keepMs) tr.keepMs = keepMs
         }
 
         // unmatched tracks: age out
@@ -143,7 +170,10 @@ class Tracker(
                 val keep = if (occluded) {
                     !sceneCut && now - tr.lastSeen <= occludedTimeoutMs
                 } else {
-                    now - tr.lastSeen <= missTimeoutMs
+                    var limit = missTimeoutMs
+                    if (tr.seenSpeed > fastSpeed) limit = max(limit, fastMissTimeoutMs)
+                    if (tr.keepMs > limit) limit = tr.keepMs
+                    now - tr.lastSeen <= limit
                 }
                 if (!keep) {
                     tracks.removeAt(j)
@@ -154,7 +184,9 @@ class Tracker(
                     tr.x1 += tr.vx * d; tr.x2 += tr.vx * d
                     tr.y1 += tr.vy * d; tr.y2 += tr.vy * d
                     tr.t = now
-                    tr.vx *= 0.5f; tr.vy *= 0.5f
+                    // damp slower while fast-moving so a blurred object stays covered
+                    val damp = if (tr.seenSpeed > fastSpeed) 0.8f else 0.5f
+                    tr.vx *= damp; tr.vy *= damp
                 }
             }
             j--
@@ -172,6 +204,7 @@ class Tracker(
             tr.lastOccluded = Long.MIN_VALUE / 2
             tr.occludedSince = Long.MIN_VALUE / 2
             tr.confirmedAt = now
+            tr.keepMs = keepMs
             tracks.add(tr)
         }
     }
@@ -189,12 +222,14 @@ class Tracker(
             val ncy = (my1 + my2) * 0.5f
             val ivx = (ncx - ocx) / dtMs
             val ivy = (ncy - ocy) / dtMs
-            val a = 0.5f
+            // react faster to large motion (fast pans / moving bodies)
+            val a = if (kotlin.math.sqrt(ivx * ivx + ivy * ivy) > fastSpeed) 0.8f else 0.5f
             tr.vx = if (tr.hits == 1) ivx * a else tr.vx * (1 - a) + ivx * a
             tr.vy = if (tr.hits == 1) ivy * a else tr.vy * (1 - a) + ivy * a
             // limit to something physically plausible (~4 screen-widths/s at 540 px)
             tr.vx = tr.vx.coerceIn(-2f, 2f)
             tr.vy = tr.vy.coerceIn(-2f, 2f)
+            tr.seenSpeed = tr.speed()
         }
         val k = smoothing
         val sx1 = px1 + (mx1 - px1) * k

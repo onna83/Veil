@@ -61,6 +61,7 @@ class Pipeline(
     private var lastDx = 0f
     private var lastDy = 0f
     private var scrolling = false
+    private var lastScrollT = Long.MIN_VALUE / 2
 
     // what the detector has already seen
     private var lastDetCumX = 0.0
@@ -80,6 +81,11 @@ class Pipeline(
     private val toRemove = ArrayList<Tracker.Track>()
 
     @Volatile var sceneGuardEnabled = true
+    /** pre-emptive strip at the scroll-entry edge (off by default since v1.3) */
+    @Volatile var scrollGuardEnabled = false
+    /** small images / grid boost (tiled passes) */
+    @Volatile var gridBoostEnabled = true
+    val tiles = TileScheduler()
     @Volatile var appearanceGuardEnabled = true
     @Volatile var csvLog = false
     @Volatile var paused = false
@@ -102,6 +108,8 @@ class Pipeline(
         var h = 0
         var readyNs = 0L
         var skin = FloatArray(0)
+        var region = -1
+        var rx = 0; var ry = 0; var rw = 0; var rh = 0
     }
 
     private val lock = Object()
@@ -118,6 +126,9 @@ class Pipeline(
         var frameId = 0L; var tCap = 0L; var cumX = 0.0; var cumY = 0.0; var gen = 0; var cut = false
         var queueMs = 0f; var inferMs = 0f; var decodeMs = 0f; var doneNs = 0L
         var skin = FloatArray(0)
+        var region = -1
+        var rx = 0; var ry = 0; var rw = 0; var rh = 0
+        val clipped = BooleanArray(n)
     }
 
     // ---------------- metrics ----------------
@@ -129,6 +140,8 @@ class Pipeline(
     private val mAppear = Ema()
     @Volatile private var inferMsShared = 16f
     private var capFrames = 0
+    private var tilePassCount = 0
+    private var fullPassCount = 0
     private var detFrames = 0
     private var ringDrops = 0
     private var statStart = 0L
@@ -162,6 +175,7 @@ class Pipeline(
         guard.reset()
         shift.reset()
         appear.reset()
+        tiles.reset()
         cutGuard = null
         pendingCut = false
         haveDet = false
@@ -255,11 +269,16 @@ class Pipeline(
         if (abs(gvy) < 0.005f) gvy = 0f
         lastDx = dx; lastDy = dy
         scrolling = shift.confident && !shift.static && (abs(dx) >= 0.5f || abs(dy) >= 0.5f)
+        if (scrolling) lastScrollT = tCap
+        // no pre-emptive covering while scrolling (or just after): only real
+        // detections + scroll-compensated tracks cover content then
+        val recentScroll = tCap - lastScrollT < SCROLL_QUIET_MS
 
         // 3. scene-cut guard (our own censors masked; a confident scroll is not a cut)
         val t2 = System.nanoTime()
         val cutRaw = guard.analyze(frame, w, h, stride, excl, nExcl)
-        val cut = sceneGuardEnabled && cutRaw && !scrolling
+        val cut = CutGate.fire(sceneGuardEnabled, cutRaw, scrolling, tCap, lastScrollT)
+        if (scrolling) cutGuard = null // never hold a full-screen cover while the user scrolls
         if (cut) {
             cutGuard = buildGuardBox(tCap)
             cutGuardFrame = frameId
@@ -268,7 +287,7 @@ class Pipeline(
         val t3 = System.nanoTime()
 
         // 3b. appearance guard: new skin-coloured content since the detector last looked
-        if (appearanceGuardEnabled) {
+        if (appearanceGuardEnabled || gridBoostEnabled) {
             var nt = 0
             for (tr in tracker.tracks) {
                 if (nt >= trackRects.size / 4) break
@@ -276,9 +295,17 @@ class Pipeline(
                 trackRects[4 * nt + 2] = tr.x2; trackRects[4 * nt + 3] = tr.y2
                 nt++
             }
-            appear.analyze(frame, w, h, stride, excl, nExcl, trackRects, nt, cumX, cumY, frameId, tCap)
+            appear.analyze(
+                frame, w, h, stride, excl, nExcl, trackRects, nt, cumX, cumY, frameId, tCap,
+                trigger = appearanceGuardEnabled && !recentScroll,
+            )
             mAppear.add(appear.lastMs)
+            if (gridBoostEnabled) {
+                tiles.layout(w, h)
+                tiles.observe(appear.skin, appear.cols, appear.rows, appear.cell, cumX, cumY, tCap)
+            }
         } else if (appear.boxes.isNotEmpty()) appear.reset()
+        tiles.enabled = gridBoostEnabled
 
         // 4. capture probe (are we captured? draw->capture latency)
         if (mode != CaptureProbe.Mode.SINGLE_APP) {
@@ -379,7 +406,16 @@ class Pipeline(
             sl.state = WRITING
             sl
         }
-        slot.pre.process(frame, fw, fh, stride)
+        if (pendingCut) tiles.requestFull()
+        val region = if (gridBoostEnabled) tiles.peek(tCap) else -1
+        val tl = if (region >= 0) tiles.tiles.getOrNull(region) else null
+        if (tl != null) {
+            slot.region = region; slot.rx = tl.x; slot.ry = tl.y; slot.rw = tl.side; slot.rh = tl.side
+            slot.pre.process(frame, tl.side, tl.side, stride, tl.y * stride + tl.x * 4)
+        } else {
+            slot.region = -1; slot.rx = 0; slot.ry = 0; slot.rw = fw; slot.rh = fh
+            slot.pre.process(frame, fw, fh, stride)
+        }
         slot.frameId = frameId; slot.tCap = tCap; slot.cumX = cumX; slot.cumY = cumY
         slot.gen = generation; slot.w = fw; slot.h = fh
         slot.cut = pendingCut
@@ -401,7 +437,16 @@ class Pipeline(
         for (i in 0 until r.count) {
             r.x1[i] += ox; r.x2[i] += ox; r.y1[i] += oy; r.y2[i] += oy
         }
-        tracker.update(r.count, r.x1, r.y1, r.x2, r.y2, r.score, r.cls, now, r.cut)
+        val tile = r.region >= 0
+        tracker.update(
+            r.count, r.x1, r.y1, r.x2, r.y2, r.score, r.cls, now, r.cut && !tile,
+            clipped = if (tile) r.clipped else null, keepMs = if (tile) TILE_KEEP_MS else 0L,
+        )
+        if (!tile) {
+            var big = false
+            for (i in 0 until r.count) if ((r.x2[i] - r.x1[i]) * (r.y2[i] - r.y1[i]) > 0.02f * w * h && r.score[i] >= 0.3f) big = true
+            tiles.bigContent = big
+        }
         // record the uncovered ring of every track confirmed just now
         for (tr in tracker.tracks) {
             if (tr.confirmedAt != now) continue
@@ -414,9 +459,17 @@ class Pipeline(
                 excl, nExcl, cumX, cumY,
             )
         }
-        appear.onDetected(r.skin, r.cumX, r.cumY, r.frameId, now)
-        lastDetCumX = r.cumX; lastDetCumY = r.cumY; haveDet = true
-        if (cutGuard != null && r.frameId >= cutGuardFrame) cutGuard = null
+        if (tile) {
+            appear.onDetected(r.skin, r.cumX, r.cumY, r.frameId, now,
+                r.rx.toFloat(), r.ry.toFloat(), (r.rx + r.rw).toFloat(), (r.ry + r.rh).toFloat())
+            tilePassCount++
+        } else {
+            appear.onDetected(r.skin, r.cumX, r.cumY, r.frameId, now)
+            lastDetCumX = r.cumX; lastDetCumY = r.cumY; haveDet = true
+            // scene-cut guard: released by the first FULL detector pass on a post-cut frame
+            if (cutGuard != null && CutGate.releases(r.frameId, cutGuardFrame)) cutGuard = null
+            fullPassCount++
+        }
         publish(now, buildScrollGuard(now, probe.mode, mInterval.v))
 
         mQueue.add(r.queueMs); mInfer.add(r.inferMs); mDecode.add(r.decodeMs); mPost.add(tPost)
@@ -436,7 +489,7 @@ class Pipeline(
      * captured and hide the new content from the detector.
      */
     private fun buildScrollGuard(tCap: Long, mode: CaptureProbe.Mode, interval: Float): CensorBox? {
-        if (!sceneGuardEnabled || mode != CaptureProbe.Mode.SINGLE_APP || !haveDet) return null
+        if (!scrollGuardEnabled || mode != CaptureProbe.Mode.SINGLE_APP || !haveDet) return null
         val pendX = (cumX - lastDetCumX).toFloat()
         val pendY = (cumY - lastDetCumY).toFloat()
         val lat = renderer.leadMs + inferMsShared + max(interval, vsyncMs)
@@ -497,8 +550,12 @@ class Pipeline(
             val bw = x2 - x1; val bh = y2 - y1
             val px = bw * PAD + MIN_PAD
             val py = bh * PAD + MIN_PAD
-            val leadX = vx * LEAD_PAD_MS
-            val leadY = vy * LEAD_PAD_MS
+            // pad ahead of the motion: object motion x detector latency (fast movement leaks
+            // otherwise), page motion only a little (it is predicted precisely)
+            val padMs = mDetAge.v.coerceIn(30f, 120f)
+            val rvx = if (occluded) 0f else tr.vx; val rvy = if (occluded) 0f else tr.vy
+            val leadX = rvx * padMs + gvx * LEAD_PAD_GLOBAL_MS
+            val leadY = rvy * padMs + gvy * LEAD_PAD_GLOBAL_MS
             x1 -= px + max(-leadX, 0f); x2 += px + max(leadX, 0f)
             y1 -= py + max(-leadY, 0f); y2 += py + max(leadY, 0f)
             x1 = max(x1, 0f); y1 = max(y1, 0f); x2 = min(x2, w); y2 = min(y2, h)
@@ -560,14 +617,19 @@ class Pipeline(
                         if (s != null) break
                         lock.wait()
                     }
-                    s?.also { it.state = INFER }
+                    s?.also { taken ->
+                        taken.state = INFER
+                        // an older READY slot for the same region is now pointless
+                        for (c in slots) if (c !== taken && c.state == READY && !c.cut && c.region == taken.region) c.state = FREE
+                    }
                 } ?: break
+                tiles.commit(slot.region, slot.tCap, slot.cumX, slot.cumY)
                 val tStart = System.nanoTime()
                 val out = det.run(slot.pre.output)
                 val tInf = System.nanoTime()
                 val n = decoder.decode(
-                    out, det.coordScale, slot.pre.scale, tracker.keepThreshold, classMask,
-                    classAware = true, iouThreshold = 0.45f, maxX = slot.w.toFloat(), maxY = slot.h.toFloat(),
+                    out, det.coordScale, slot.pre.scale, tracker.fastKeepThreshold, classMask,
+                    classAware = true, iouThreshold = 0.45f, maxX = slot.rw.toFloat(), maxY = slot.rh.toFloat(),
                 )
                 val r = DetResult(max(n, 1))
                 r.count = n
@@ -577,6 +639,17 @@ class Pipeline(
                 r.frameId = slot.frameId; r.tCap = slot.tCap; r.cumX = slot.cumX; r.cumY = slot.cumY
                 r.gen = slot.gen; r.cut = slot.cut
                 r.skin = slot.skin.copyOf()
+                r.region = slot.region; r.rx = slot.rx; r.ry = slot.ry; r.rw = slot.rw; r.rh = slot.rh
+                if (slot.region >= 0) {
+                    // tile coords -> frame coords; flag boxes cut by an interior tile edge
+                    val ox = slot.rx.toFloat(); val oy = slot.ry.toFloat()
+                    for (i in 0 until n) {
+                        r.clipped[i] = (slot.rx > 0 && r.x1[i] <= 2f) || (slot.ry > 0 && r.y1[i] <= 2f) ||
+                            (slot.rx + slot.rw < slot.w && r.x2[i] >= slot.rw - 2f) ||
+                            (slot.ry + slot.rh < slot.h && r.y2[i] >= slot.rh - 2f)
+                        r.x1[i] += ox; r.x2[i] += ox; r.y1[i] += oy; r.y2[i] += oy
+                    }
+                }
                 r.queueMs = (tStart - slot.readyNs) / 1e6f
                 r.inferMs = (tInf - tStart) / 1e6f
                 r.decodeMs = (System.nanoTime() - tInf) / 1e6f
@@ -624,12 +697,19 @@ class Pipeline(
             java.util.Locale.US, "%.2f ms, boxes %d, new cells %d, fired %d",
             mAppear.v, appear.boxes.size, appear.lastNewCells, appear.triggers,
         )
+        val tps = tilePassCount * 1000f / max(dt, 1L); val fps = fullPassCount * 1000f / max(dt, 1L)
+        tilePassCount = 0; fullPassCount = 0
+        val gb = if (!gridBoostEnabled) "off" else String.format(
+            java.util.Locale.US, "%d tiles of %d px, hot %d, full %.1f/s tile %.1f/s, hot-tile cycle %.0f ms",
+            tiles.tiles.size, tiles.tiles.firstOrNull()?.side ?: 0, tiles.hotCount(), fps, tps, tiles.cycleMsEma,
+        )
         val hud = String.format(
             java.util.Locale.US,
             "%s | %s\ncapture: %s | %.0f x %d\n" +
                 "cap %.1f fps (int %.1f) deliver %.1f copy %.2f\n" +
                 "shift %.2f guard %.2f analyze+publish %.2f pre %.2f\n" +
                 "appear guard: %s\n" +
+                "grid boost: %s\n" +
                 "det %.1f fps: queue %.1f infer %.1f decode %.2f post %.2f\n" +
                 "overlay: hop %.1f apply %.2f layout %.2f relayout %.0f/s draw %.0f/s\n" +
                 "probe draw→cap %s lead %.0f vsync %.1f\n" +
@@ -638,7 +718,7 @@ class Pipeline(
             backendName, socInfo, mode, fw.toFloat(), fh,
             capFps, mInterval.v, mDeliver.v, mCopy.v,
             mShift.v, mGuard.v, mAnalyze.v, mPre.v,
-            ag,
+            ag, gb,
             detFps, mQueue.v, mInfer.v, mDecode.v, mPost.v,
             r.hopMsEma, r.applyMsEma, r.layoutMsEma, r.relayoutsPerSec, r.drawsPerSec,
             if (pl > 0) String.format(java.util.Locale.US, "%.0f ms", pl) else "n/a", r.leadMs, vsyncMs,
@@ -656,7 +736,11 @@ class Pipeline(
         const val OCCLUSION_DIFF = 10f
         const val PAD = 0.10f
         const val MIN_PAD = 3f
-        const val LEAD_PAD_MS = 50f
+        const val LEAD_PAD_GLOBAL_MS = 20f
+        /** quiet time after a scroll before pre-emptive guards may fire again */
+        const val SCROLL_QUIET_MS = 150L
+        /** keep-alive of tracks confirmed by tile passes (tiles revisit slowly) */
+        const val TILE_KEEP_MS = 1200L
         private const val FREE = 0
         private const val WRITING = 1
         private const val READY = 2
