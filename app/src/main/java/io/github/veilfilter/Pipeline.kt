@@ -69,6 +69,9 @@ class Pipeline(
     private var lastDetCumX = 0.0
     private var lastDetCumY = 0.0
     private var haveDet = false
+    /** after a live model switch: cover the whole frame until the new model's first detection */
+    @Volatile var coverUntilFirstDetection = false
+    private var warmDone = false
 
     private var cutGuard: CensorBox? = null
     private var cutGuardFrame = 0L
@@ -615,6 +618,14 @@ class Pipeline(
         if (pix.size > tmpIds.size) pix.keys.retainAll(tmpIds)
         cutGuard?.let { out.add(it) }
         scrollGuard?.let { out.add(it) }
+        if (haveDet) warmDone = true
+        if (coverUntilFirstDetection && !warmDone) {
+            val cols = 12
+            val rows = max(1, (12f * h / max(1f, w)).toInt())
+            val c = IntArray(cols * rows)
+            Pixelator.sampleBlocks(frame, fw, fh, stride, 0f, 0f, w, h, cols, rows, c)
+            out.add(CensorBox(WARM_ID, 0f, 0f, w, h, 0f, 0f, tCap, cols, rows, c))
+        }
         for (b in appear.boxes) {
             val x1 = max(b.x1, 0f); val y1 = max(b.y1, 0f); val x2 = min(b.x2, w); val y2 = min(b.y2, h)
             if (x2 - x1 < 1f || y2 - y1 < 1f) continue

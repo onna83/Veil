@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.veilfilter"
         minSdk = 34
         targetSdk = 35
-        versionCode = 7
-        versionName = "1.5.0"
+        versionCode = 8
+        versionName = "1.6.0"
         ndk {
             // Android 14+ phones are arm64. Add "x86_64" here to run on an emulator.
             abiFilters += listOf("arm64-v8a")
@@ -84,5 +84,8 @@ dependencies {
     "classicImplementation"("com.google.ai.edge.litert:litert-gpu-api:1.4.2")
     "litert2Implementation"("com.google.ai.edge.litert:litert:2.3.0")
     "litert2Implementation"("com.google.ai.edge.litert:litert-gpu:2.3.0")
+    // ONNX Runtime: runs the official NudeNet .onnx files (downloaded on demand)
+    // classic only: +12.9 MB compressed would push the litert2 zip past 25 MB
+    "classicImplementation"("com.microsoft.onnxruntime:onnxruntime-android:1.31.0")
     testImplementation("junit:junit:4.13.2")
 }

@@ -130,11 +130,14 @@ class MainActivity : Activity() {
     override fun onStart() {
         super.onStart()
         ServiceState.addListener(listener)
+        ModelManager.addListener(modelListener)
         refresh()
+        refreshModels()
     }
 
     override fun onStop() {
         ServiceState.removeListener(listener)
+        ModelManager.removeListener(modelListener)
         super.onStop()
     }
 
@@ -219,35 +222,104 @@ class MainActivity : Activity() {
     }
 
     private lateinit var modelStatus: TextView
+    private class Row(val title: TextView, val detail: TextView, val bar: android.widget.ProgressBar,
+                      val dl: Button, val del: Button, val use: Button)
+    private val rows = LinkedHashMap<ModelSize, Row>()
+    private val modelListener: () -> Unit = { runOnUiThread { refreshModels() } }
 
     private fun setupModelPicker() {
         modelStatus = findViewById(R.id.model_status)
-        val sp = findViewById<Spinner>(R.id.model)
-        val models = ModelSize.entries
-        sp.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, models.map { it.label })
-        sp.setSelection(models.indexOf(AppSettings.modelSize).coerceAtLeast(0))
-        sp.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
-                AppSettings.setModel(this@MainActivity, models[pos]); refreshModelStatus()
+        val list = findViewById<android.widget.LinearLayout>(R.id.model_list)
+        val dp = resources.displayMetrics.density
+        for (m in ModelSize.entries) {
+            val box = android.widget.LinearLayout(this).apply {
+                orientation = android.widget.LinearLayout.VERTICAL
+                setPadding(0, (10 * dp).toInt(), 0, (4 * dp).toInt())
             }
-            override fun onNothingSelected(p: AdapterView<*>?) {}
+            val title = TextView(this).apply { textSize = 15f }
+            val detail = TextView(this).apply { alpha = 0.75f; textSize = 12f }
+            val bar = android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 1000 }
+            val btns = android.widget.LinearLayout(this).apply { orientation = android.widget.LinearLayout.HORIZONTAL }
+            fun btn(t: Int) = Button(this, null, android.R.attr.buttonStyleSmall).apply { setText(t); minHeight = (48 * dp).toInt() }
+            val dl = btn(R.string.model_download); val del = btn(R.string.model_delete); val use = btn(R.string.model_use)
+            btns.addView(dl); btns.addView(del); btns.addView(use)
+            box.addView(title); box.addView(detail); box.addView(bar); box.addView(btns)
+            list.addView(box)
+            dl.setOnClickListener {
+                if (ModelManager.status(this, m) is ModelManager.Status.Downloading) ModelManager.cancel(m)
+                else ModelManager.download(this, m)
+            }
+            del.setOnClickListener {
+                val shared = ModelSize.entries.filter { it != m && it.file == m.file }
+                if (shared.isNotEmpty()) Toast.makeText(this, getString(R.string.model_shared, m.file, shared.joinToString { it.id }), Toast.LENGTH_LONG).show()
+                ModelManager.delete(this, m)
+            }
+            use.setOnClickListener { useModel(m) }
+            rows[m] = Row(title, detail, bar, dl, del, use)
         }
         findViewById<Button>(R.id.import_model).setOnClickListener {
             val i = Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
                 .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
             try { startActivityForResult(i, REQ_IMPORT) } catch (_: Exception) { modelStatus.text = getString(R.string.import_no_picker) }
         }
-        refreshModelStatus()
+        val url = findViewById<android.widget.EditText>(R.id.model_base_url)
+        url.setText(AppSettings.modelBaseUrl)
+        findViewById<Button>(R.id.save_base_url).setOnClickListener {
+            val v = url.text.toString().trim()
+            if (v.isNotEmpty() && !v.startsWith("https://")) { Toast.makeText(this, R.string.base_url_bad, Toast.LENGTH_SHORT).show(); return@setOnClickListener }
+            AppSettings.setModelBaseUrl(this, v)
+            url.setText(AppSettings.modelBaseUrl)
+            Toast.makeText(this, R.string.base_url_saved, Toast.LENGTH_SHORT).show()
+            refreshModels()
+        }
+        val nn = findViewById<Switch>(R.id.ort_nnapi)
+        nn.isChecked = AppSettings.ortNnapi(this)
+        nn.setOnCheckedChangeListener { _, v -> AppSettings.setOrtNnapi(this, v) }
+        refreshModels()
     }
 
-    private fun refreshModelStatus() {
-        val m = AppSettings.modelSize
-        val big = ModelSize.M640
-        val imported = big.available(this)
-        modelStatus.text = getString(
-            if (m.external && !imported) R.string.model_missing else R.string.model_status,
-            m.id, if (imported) getString(R.string.model_imported) else getString(R.string.model_not_imported),
-        )
+    private fun useModel(m: ModelSize) {
+        if (!m.available(this)) return
+        AppSettings.setModel(this, m)
+        CaptureService.switchModel(this) // live swap if protection is running
+        Toast.makeText(this, getString(R.string.model_switched, m.label), Toast.LENGTH_SHORT).show()
+        refreshModels()
+    }
+
+    private fun mb(b: Long) = ((b + 500_000) / 1_000_000).toInt()
+
+    private fun refreshModels() {
+        val current = AppSettings.effectiveModel(this)
+        for ((m, r) in rows) {
+            val st = ModelManager.status(this, m)
+            if (m.runtime == ModelRuntime.ONNX && !OrtDetector.SUPPORTED) {
+                r.title.text = m.label
+                r.detail.setText(R.string.model_needs_classic)
+                r.bar.visibility = View.GONE; r.dl.visibility = View.GONE; r.del.visibility = View.GONE; r.use.visibility = View.GONE
+                continue
+            }
+            r.title.text = if (m == current) "${m.label}  ·  ${getString(R.string.model_in_use)}" else m.label
+            r.title.setTypeface(null, if (m == current) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+            val size = if (m.external) "%.1f MB".format(java.util.Locale.US, m.bytes / 1e6) else "in app"
+            val stText = when (st) {
+                is ModelManager.Status.Bundled -> getString(R.string.model_status_bundled)
+                is ModelManager.Status.Ready -> getString(R.string.model_status_ready)
+                is ModelManager.Status.NotDownloaded -> getString(R.string.model_status_none)
+                is ModelManager.Status.NoHost -> getString(R.string.model_status_nohost)
+                is ModelManager.Status.Partial -> getString(R.string.model_status_partial, mb(st.bytes))
+                is ModelManager.Status.Downloading -> getString(R.string.model_status_dl, mb(st.done), mb(st.total))
+            }
+            val err = ModelManager.error(m)?.let { "\n⚠ $it" } ?: ""
+            r.detail.text = "$size · ${m.note}\n$stText$err"
+            val downloading = st is ModelManager.Status.Downloading
+            r.bar.visibility = if (downloading) View.VISIBLE else View.GONE
+            if (st is ModelManager.Status.Downloading && st.total > 0) r.bar.progress = (1000 * st.done / st.total).toInt()
+            r.dl.visibility = if (m.external && st !is ModelManager.Status.Ready) View.VISIBLE else View.GONE
+            r.dl.setText(if (downloading) R.string.model_cancel else R.string.model_download)
+            r.dl.isEnabled = st !is ModelManager.Status.NoHost
+            r.del.visibility = if (m.external && (st is ModelManager.Status.Ready || st is ModelManager.Status.Partial)) View.VISIBLE else View.GONE
+            r.use.visibility = if (m != current && (st is ModelManager.Status.Ready || st is ModelManager.Status.Bundled)) View.VISIBLE else View.GONE
+        }
     }
 
     private fun importModel(data: Intent) {
@@ -256,14 +328,14 @@ class MainActivity : Activity() {
         if (uris.isEmpty()) data.data?.let { uris.add(it) }
         val sources = uris.map { u -> ModelImporter.Source(displayName(u)) { contentResolver.openInputStream(u) ?: error("cannot open $u") } }
         modelStatus.text = getString(R.string.importing)
-        val dst = ModelSize.M640.filePath(this)
+        val dir = java.io.File(filesDir, "models")
         Thread({
             var last = 0L
-            val err = ModelImporter.import(sources, dst) { n ->
+            val (m, err) = ModelImporter.importAny(sources, dir) { n ->
                 if (n - last > 4_000_000) { last = n; runOnUiThread { modelStatus.text = getString(R.string.importing_mb, n / 1_000_000) } }
             }
             runOnUiThread {
-                if (err == null) { Toast.makeText(this, R.string.import_ok, Toast.LENGTH_LONG).show(); refreshModelStatus() }
+                if (m != null) { modelStatus.text = getString(R.string.import_ok, m.file); ModelManager.changed() }
                 else modelStatus.text = err
             }
         }, "veil-import").start()
@@ -288,18 +360,21 @@ class MainActivity : Activity() {
         benchRunning = true
         benchBtn.isEnabled = false
         benchOut.setText(R.string.benchmark_running)
-        val model = AppSettings.modelSize
+        val model = AppSettings.effectiveModel(this)
         val app = applicationContext
         Thread({
             val sb = StringBuilder()
             sb.append("${Backends.RUNTIME}, ${model.id}, ${android.os.Build.SOC_MANUFACTURER} ${android.os.Build.SOC_MODEL}\n")
             var bestId = ""
             var bestMs = Double.MAX_VALUE
-            for (o in Backends.options) {
-                if (o.id == "auto") continue
+            val ids = if (model.runtime == ModelRuntime.ONNX) listOf("cpu", "nnapi")
+                else Backends.options.map { it.id }.filter { it != "auto" }
+            for (oid in ids) {
+                val o = object { val id = oid }
                 val line = try {
                     val t0 = System.nanoTime()
-                    val d = Backends.createExact(app, o.id, model)
+                    val d = if (model.runtime == ModelRuntime.ONNX) OrtDetector.create(app, model, oid == "nnapi")
+                        else Backends.createExact(app, o.id, model)
                     val initMs = (System.nanoTime() - t0) / 1e6
                     try {
                         val times = DetectorFactory.time(d, 5, 30)
@@ -316,7 +391,7 @@ class MainActivity : Activity() {
                 val partial = sb.toString()
                 runOnUiThread { benchOut.text = partial }
             }
-            if (bestId.isNotEmpty()) {
+            if (bestId.isNotEmpty() && model.runtime == ModelRuntime.TFLITE) {
                 DetectorFactory.remember(app, model, bestId, bestMs)
                 sb.append("Auto will use: $bestId\n")
             }

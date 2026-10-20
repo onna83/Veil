@@ -42,7 +42,11 @@ class CaptureService : Service() {
     @Volatile private var reader: ImageReader? = null
     private var thread: HandlerThread? = null
     private var worker: Handler? = null
-    private var pipeline: Pipeline? = null
+    @Volatile private var pipeline: Pipeline? = null
+    private var activeModel = ModelSize.S320
+    private var probeRef: CaptureProbe? = null
+    private var socInfo = ""
+    private var vsyncMs = 16.6f
     private var renderer: OverlayRenderer? = null
     private val main = Handler(Looper.getMainLooper())
     private var windowCtx: Context? = null
@@ -86,6 +90,7 @@ class CaptureService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> { shutdown(); return START_NOT_STICKY }
+            ACTION_SWITCH_MODEL -> { if (projection != null) switchModel(); return START_NOT_STICKY }
             ACTION_START -> {
                 if (projection != null) return START_NOT_STICKY
                 val code = intent.getIntExtra(EXTRA_CODE, Activity.RESULT_CANCELED)
@@ -130,36 +135,17 @@ class CaptureService : Service() {
         thread = t
         val h = Handler(t.looper)
         worker = h
-        val model = AppSettings.modelSize
-        val backendId = AppSettings.backend
-        val soc = "${Build.SOC_MANUFACTURER} ${Build.SOC_MODEL}".trim()
-        val p = Pipeline(
-            detectorFactory = { status -> DetectorFactory.create(applicationContext, backendId, model, status) },
-            model = model,
-            renderer = r,
-            probe = probe,
-            capture = h,
-            onHud = { text -> main.post { showHud(text) } },
-            onFatal = { msg ->
-                ServiceState.lastError = msg
-                main.post { shutdown() }
-            },
-            socInfo = soc,
-        )
-        p.sceneGuardEnabled = AppSettings.sceneGuard
-        p.csvLog = AppSettings.csvLog
-        p.appearanceGuardEnabled = AppSettings.appearanceGuard
-        p.scrollGuardEnabled = AppSettings.scrollGuard
-        p.gridBoostEnabled = AppSettings.gridBoost && AppSettings.modelSize.tiles
-            p.censor = AppSettings.censor
-            p.blockPx = AppSettings.blockCapturePx(AppSettings.pixelDp, resources.displayMetrics.density, capW, screenW)
-        p.vsyncMs = vsync
-        p.extraLeadMs = AppSettings.extraLeadMs.toFloat()
+        val model = AppSettings.effectiveModel(this)
+        activeModel = model
+        probeRef = probe
+        socInfo = "${Build.SOC_MANUFACTURER} ${Build.SOC_MODEL}".trim()
+        vsyncMs = vsync
+        val p = buildPipeline(model, r, h)
         pipeline = p
         if (p.csvLog) {
             Log.i(Pipeline.CSV, Pipeline.CSV_HEADER_F)
             Log.i(Pipeline.CSV, Pipeline.CSV_HEADER_D)
-            Log.i(Pipeline.CSV, "I,soc=$soc,model=${model.id},backend=$backendId,runtime=${Backends.RUNTIME},refresh=${display.refreshRate}")
+            Log.i(Pipeline.CSV, "I,soc=$socInfo,model=${model.id},backend=${AppSettings.backend},runtime=${Backends.RUNTIME},refresh=${display.refreshRate}")
         }
         p.start()
 
@@ -181,19 +167,72 @@ class CaptureService : Service() {
         if (AppSettings.debugHud) r.showHud("Veil: starting… (${Backends.RUNTIME})")
     }
 
+    private fun applyLive(p: Pipeline) {
+        p.sceneGuardEnabled = AppSettings.sceneGuard
+        p.csvLog = AppSettings.csvLog
+        p.appearanceGuardEnabled = AppSettings.appearanceGuard
+        p.scrollGuardEnabled = AppSettings.scrollGuard
+        p.gridBoostEnabled = AppSettings.gridBoost && activeModel.tiles
+        p.censor = AppSettings.censor
+        p.blockPx = AppSettings.blockCapturePx(AppSettings.pixelDp, resources.displayMetrics.density, capW, screenW)
+        p.extraLeadMs = AppSettings.extraLeadMs.toFloat()
+    }
+
+    private fun buildPipeline(model: ModelSize, r: OverlayRenderer, h: Handler): Pipeline {
+        val backendId = AppSettings.backend
+        val p = Pipeline(
+            detectorFactory = { status -> DetectorFactory.create(applicationContext, backendId, model, status) },
+            model = model,
+            renderer = r,
+            probe = probeRef!!,
+            capture = h,
+            onHud = { text -> main.post { showHud(text) } },
+            onFatal = { msg ->
+                ServiceState.lastError = msg
+                main.post { shutdown() }
+            },
+            socInfo = socInfo,
+        )
+        p.vsyncMs = vsyncMs
+        applyLive(p)
+        return p
+    }
+
+    /**
+     * Live model switch ("Use" in the model manager while running): build a
+     * pipeline for the new model, swap it in on the capture thread (the old
+     * one's inference thread stops and closes its detector), cover the frame
+     * until the new model's first detection, then resize the capture if the
+     * new model wants a different size. No new screen-capture consent needed.
+     */
+    private fun switchModel() {
+        if (stopping || projection == null) return
+        val nm = AppSettings.effectiveModel(this)
+        if (nm == activeModel) return
+        val r = renderer ?: return
+        val wk = worker ?: return
+        Log.i(TAG, "switching model ${activeModel.id} -> ${nm.id}")
+        activeModel = nm
+        val np = buildPipeline(nm, r, wk)
+        np.coverUntilFirstDetection = true
+        wk.post {
+            if (stopping) { np.release(); return@post }
+            val old = pipeline
+            try { old?.release() } catch (_: Throwable) {}
+            pipeline = np
+            np.start()
+        }
+        if (AppSettings.debugHud) r.showHud("Veil: loading ${nm.id}…")
+        reconfigure()
+    }
+
     private fun newReader(w: Int, h: Int): ImageReader {
         val ir = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3)
-        val p = pipeline!!
         ir.setOnImageAvailableListener({ rd ->
-            // keep settings live
-            p.sceneGuardEnabled = AppSettings.sceneGuard
-            p.csvLog = AppSettings.csvLog
-            p.appearanceGuardEnabled = AppSettings.appearanceGuard
-            p.scrollGuardEnabled = AppSettings.scrollGuard
-            p.gridBoostEnabled = AppSettings.gridBoost && AppSettings.modelSize.tiles
-            p.censor = AppSettings.censor
-            p.blockPx = AppSettings.blockCapturePx(AppSettings.pixelDp, resources.displayMetrics.density, capW, screenW)
-            p.extraLeadMs = AppSettings.extraLeadMs.toFloat()
+            // always the CURRENT pipeline (it can be swapped by a model switch)
+            val p = pipeline
+            if (p == null) { rd.acquireLatestImage()?.close(); return@setOnImageAvailableListener }
+            applyLive(p) // keep settings live
             p.onImageAvailable(rd)
         }, worker)
         return ir
@@ -217,7 +256,7 @@ class CaptureService : Service() {
         // grid boost: 4x input (1280 for 320) so 2-across tiles get ~1:1 source pixels
         // 640-input models: capped at 1280 (more pixels would only cost copy/analysis time)
         val long = ModelSize.captureLong(
-            AppSettings.modelSize, if (AppSettings.gridBoost) CAPTURE_LONG_PER_INPUT_GRID else CAPTURE_LONG_PER_INPUT,
+            activeModel, if (AppSettings.gridBoost) CAPTURE_LONG_PER_INPUT_GRID else CAPTURE_LONG_PER_INPUT,
         )
         var s = min(1f, long / max(cw, ch).toFloat())
         s = min(1f, max(s, MIN_SHORT_SIDE / min(cw, ch).toFloat()))
@@ -363,6 +402,7 @@ class CaptureService : Service() {
         private const val TAG = "VeilService"
         const val ACTION_START = "io.github.veilfilter.START"
         const val ACTION_STOP = "io.github.veilfilter.STOP"
+        const val ACTION_SWITCH_MODEL = "io.github.veilfilter.SWITCH_MODEL"
         const val EXTRA_CODE = "code"
         const val EXTRA_DATA = "data"
         private const val CHANNEL = "protection"
@@ -377,6 +417,12 @@ class CaptureService : Service() {
                 Intent(ctx, CaptureService::class.java).setAction(ACTION_START)
                     .putExtra(EXTRA_CODE, code).putExtra(EXTRA_DATA, data),
             )
+        }
+
+        /** apply AppSettings.model to a running capture without restarting it */
+        fun switchModel(ctx: Context) {
+            if (ServiceState.running)
+                ctx.startService(Intent(ctx, CaptureService::class.java).setAction(ACTION_SWITCH_MODEL))
         }
 
         fun stop(ctx: Context) {

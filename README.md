@@ -1,10 +1,11 @@
-# Veil (v1.5)
+# Veil (v1.6)
 
 Veil is a free, open-source, **fully on-device** nudity filter for Android 14+.
-It watches the screen with MediaProjection, runs the NudeNet v3 `320n` detector
+It watches the screen with MediaProjection, runs the NudeNet v3 detector
 on every captured frame, and covers exposed regions with a **pixelate** censor
-drawn in small overlay windows. It has no network permission, so nothing ever
-leaves the phone.
+drawn in small overlay windows. Screen content never leaves the phone. Since
+v1.6 Veil has the INTERNET permission, used **only** for model downloads you
+start yourself (see below).
 
 v1 is deliberately minimal. It has one censor style (pixelate) and is built for
 **low latency**. There is no browser, recording, stats, presets, PIN or
@@ -13,6 +14,62 @@ translations.
 > **Status:** v1 ran on a Galaxy S23 FE (censoring works; visible lag while
 > scrolling). v1.1 targets that scroll lag. It compiles and its core logic is
 > unit-tested on the JVM, but **v1.1 has not run on a device yet.**
+
+## What's new in v1.6 (download and switch models in the app)
+
+**Model manager** (main screen, "Detection models"). Each model shows its name,
+size, a speed note and its status (bundled / not downloaded / partly downloaded /
+downloading with a progress bar / downloaded). Buttons: **Download** (becomes
+**Cancel** while running), **Delete** and **Use**. **Use** applies immediately.
+If protection is running, the capture keeps going and is not re-consented. Veil
+builds a new pipeline for the model, swaps it in on the capture thread and
+resizes the capture if the model needs a different size. It pixelates the whole
+frame until the new model's first detection, so nothing slips through while the
+model loads. The debug HUD's first line shows the active model id.
+
+| id | runtime | source | size | speed note (S23 FE) |
+|---|---|---|---|---|
+| `320n_320` | TFLite GPU | **bundled** | 6.2 MB | measured ~16–24 ms (default) |
+| `320n_256` | TFLite GPU | your host | 6.2 MB | est. ~12–18 ms |
+| `320n_640` | TFLite GPU | your host | 6.3 MB | est. ~40–70 ms |
+| `640m_640` | TFLite GPU | your host | 52.0 MB | est. ~120–300 ms |
+| `onnx_320n_480` / `onnx_320n_640` | ONNX Runtime CPU | **official NudeNet release** | 12.2 MB (one shared file) | est. ~30–60 / 50–100 ms |
+| `onnx_640m_480` / `onnx_640m_640` | ONNX Runtime CPU | **official NudeNet release** | 103.5 MB (one shared file) | est. ~250–500 / 400–800 ms |
+
+"est." means estimated from desktop measurements and has not been measured on
+the phone. Use the in-app benchmark (it also handles ONNX models: CPU vs. NNAPI).
+
+**Network use.** INTERNET is used only when you tap Download. HTTPS is
+mandatory: cleartext is blocked by the network security config, which also
+trusts only system CAs. There are no analytics, no update checks and no
+background jobs. A download runs on a plain thread for as long as the app
+process lives; a partial `.dl` file is resumed (HTTP Range) on the next tap.
+Up to 5 attempts are made with backoff. Every file is checked against a size
+and SHA-256 **hard-coded in the app** (`ModelSize` in `Detector.kt`) before
+it is renamed into place. A file that doesn't match is deleted and never
+loaded. GitHub's API asset endpoint is tried first (`Accept:
+application/octet-stream`, redirects followed by hand), then the public
+download URL. An HTML response (a login or rate-limit page) is rejected.
+
+**Hosting: how each source works**
+- **Official ONNX (works out of the box).** The `320n.onnx` and `640m.onnx`
+  files from `notAI-tech/NudeNet` release `v3.4-weights`, run with ONNX
+  Runtime Android 1.31 on CPU/XNNPACK (NNAPI optional under Advanced). This
+  needs no hosting of your own, but there is no GPU. **Classic build only**:
+  ORT adds ~13 MB compressed and would push the litert2 zip past 25 MB.
+- **TFLite GPU variants (needs a host).** No trustworthy public mirror of
+  these TFLite conversions exists, and converting on the phone isn't
+  feasible. Upload the three files from `/workspace/out/veil-model-host/`
+  (names and hashes in `SHA256SUMS`) to any HTTPS location, for example a
+  GitHub release. Then enter the base URL under Advanced → "TFLite model host".
+  Veil appends the file name. The shipped default
+  (`ModelSize.DEFAULT_BASE_URL`, a `YOUR-GITHUB-USER` template) counts as
+  "not configured".
+- **Manual import (offline fallback).** "Import model file(s)…" accepts any
+  catalog file: the TFLite variants, the 640m split part zips or the `.onnx`
+  files. The file is recognised by its SHA-256.
+
+Only `320n@320` is bundled now; the 256 and 640 variants of 320n left the APK.
 
 ## What's new in v1.5 (less jitter, face bug, pixel size, bigger models)
 
@@ -429,7 +486,7 @@ a HUD screenshot, phone model and Android version.
   - Preprocessing vs NudeNet's `_read_image`: max error 0.73/255.
   - Model equivalence check (TFLite vs ONNX).
   - APK checks: 16 KB page alignment of the native libraries, model stored
-    uncompressed, no INTERNET permission.
+    uncompressed. (v1.6: INTERNET only for user-started model downloads.)
 - v1.1 additions: shift estimator (integer/sub-pixel, masking our censors,
   static and unrelated content), ring check, capture probe, tracker shift,
   and an end-to-end scroll simulation. In that simulation (0.6 px/ms scroll,

@@ -21,6 +21,10 @@ object DetectorFactory {
     private class Labeled(private val d: Detector, override val backend: String) : Detector by d
 
     fun create(ctx: Context, id: String, model: ModelSize, onStatus: (String) -> Unit = {}): Detector {
+        if (model.runtime == ModelRuntime.ONNX) {
+            onStatus("loading ONNX ${model.id}…")
+            return OrtDetector.create(ctx, model, AppSettings.ortNnapi(ctx))
+        }
         if (id == "auto") return auto(ctx, model, onStatus)
         return try {
             Backends.createExact(ctx, id, model)

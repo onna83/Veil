@@ -16,6 +16,8 @@ object AppSettings {
     private const val KEY_SCROLL = "scroll_guard"
     private const val KEY_GRID = "grid_boost"
     private const val KEY_PIXEL = "pixel_dp"
+    private const val KEY_BASE_URL = "model_base_url"
+    private const val KEY_NNAPI = "ort_nnapi"
     const val PIXEL_MIN_DP = 4
     const val PIXEL_MAX_DP = 40
     /** v1.4 blocks were ~1/7 of the box (often 20-30 dp); finer default so you can judge what is covered */
@@ -58,6 +60,8 @@ object AppSettings {
     @Volatile var extraLeadMs = 0; private set
     /** pixelation block size, dp on screen, read live */
     @Volatile var pixelDp = PIXEL_DEFAULT_DP; private set
+    /** where HOSTED (TFLite) models are downloaded from; editable under Advanced */
+    @Volatile var modelBaseUrl = ModelSize.DEFAULT_BASE_URL; private set
     private var loaded = false
 
     val modelSize: ModelSize get() = model
@@ -78,8 +82,18 @@ object AppSettings {
         extraLeadMs = p.getInt(KEY_LEAD, 0).coerceIn(0, MAX_LEAD)
         censor = censorFrom { k, d -> p.getBoolean(k, d) }
         pixelDp = p.getInt(KEY_PIXEL, PIXEL_DEFAULT_DP).coerceIn(PIXEL_MIN_DP, PIXEL_MAX_DP)
+        modelBaseUrl = p.getString(KEY_BASE_URL, null)?.takeIf { it.isNotBlank() } ?: ModelSize.DEFAULT_BASE_URL
         loaded = true
     }
+
+    fun setModelBaseUrl(ctx: Context, v: String) {
+        modelBaseUrl = v.trim().ifEmpty { ModelSize.DEFAULT_BASE_URL }
+        prefs(ctx).edit().putString(KEY_BASE_URL, modelBaseUrl).apply()
+    }
+    fun ortNnapi(ctx: Context) = prefs(ctx).getBoolean(KEY_NNAPI, false)
+    fun setOrtNnapi(ctx: Context, v: Boolean) { prefs(ctx).edit().putBoolean(KEY_NNAPI, v).apply() }
+    /** selected model if its file is present, else the bundled default */
+    fun effectiveModel(ctx: Context): ModelSize = if (model.available(ctx)) model else ModelSize.S320
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
