@@ -18,6 +18,14 @@ object AppSettings {
     private const val KEY_PIXEL = "pixel_dp"
     private const val KEY_BASE_URL = "model_base_url"
     private const val KEY_NNAPI = "ort_nnapi"
+    private const val KEY_FRESH = "fresh_wait"
+    private const val KEY_FLOAT = "floating_control"
+    private const val KEY_BUBBLE_RIGHT = "bubble_right"
+    private const val KEY_BUBBLE_Y = "bubble_y_frac"
+    /** pixel sizes the floating control cycles through (dp) */
+    val PIXEL_PRESETS = intArrayOf(6, 10, 16, 24, 32)
+    /** next preset strictly above [dp], wrapping to the smallest */
+    fun nextPixelPreset(dp: Int): Int = PIXEL_PRESETS.firstOrNull { it > dp } ?: PIXEL_PRESETS[0]
     const val PIXEL_MIN_DP = 4
     const val PIXEL_MAX_DP = 40
     /** v1.4 blocks were ~1/7 of the box (often 20-30 dp); finer default so you can judge what is covered */
@@ -46,6 +54,7 @@ object AppSettings {
     fun setCensorFlag(ctx: Context, key: String, v: Boolean) {
         val p = prefs(ctx); p.edit().putBoolean(key, v).apply()
         censor = censorFrom { k, d -> if (k == key) v else p.getBoolean(k, d) }
+        changed()
     }
 
     @Volatile var sceneGuard = true; private set
@@ -54,6 +63,12 @@ object AppSettings {
     @Volatile var scrollGuard = false; private set
     @Volatile var gridBoost = true; private set
     @Volatile var csvLog = false; private set
+    /** v1.7: fresh-frame wait (v1.6.1 behaviour, now switchable), read live */
+    @Volatile var freshWait = true; private set
+    /** v1.7: floating quick-action bubble while protection runs */
+    @Volatile var floatingControl = true; private set
+    @Volatile var bubbleRight = true; private set
+    @Volatile var bubbleYFrac = 0.35f; private set
     @Volatile var backend = "auto"; private set
     @Volatile var model = ModelSize.S320; private set
     /** extra scroll prediction, ms (0..60), read live */
@@ -75,6 +90,10 @@ object AppSettings {
         scrollGuard = p.getBoolean(KEY_SCROLL, false)
         gridBoost = p.getBoolean(KEY_GRID, true)
         csvLog = p.getBoolean(KEY_CSV, false)
+        freshWait = p.getBoolean(KEY_FRESH, true)
+        floatingControl = p.getBoolean(KEY_FLOAT, true)
+        bubbleRight = p.getBoolean(KEY_BUBBLE_RIGHT, true)
+        bubbleYFrac = p.getFloat(KEY_BUBBLE_Y, 0.35f).coerceIn(0f, 1f)
         backend = p.getString(KEY_BACKEND, "auto") ?: "auto"
         if (Backends.options.none { it.id == backend }) backend = "auto"
         model = ModelSize.byId(p.getString(KEY_MODEL, null))
@@ -84,6 +103,22 @@ object AppSettings {
         pixelDp = p.getInt(KEY_PIXEL, PIXEL_DEFAULT_DP).coerceIn(PIXEL_MIN_DP, PIXEL_MAX_DP)
         modelBaseUrl = p.getString(KEY_BASE_URL, null)?.takeIf { it.isNotBlank() } ?: ModelSize.DEFAULT_BASE_URL
         loaded = true
+    }
+
+    /** tests only: forget the loaded state so [load] re-reads the prefs */
+    internal fun resetForTest() { loaded = false }
+
+    // ---- change listeners (UI thread): lets the running service react, e.g. show/hide the bubble ----
+    private val listeners = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
+    fun addListener(l: () -> Unit) { listeners.add(l) }
+    fun removeListener(l: () -> Unit) { listeners.remove(l) }
+    private fun changed() { for (l in listeners) l() }
+
+    fun setFreshWait(ctx: Context, v: Boolean) { freshWait = v; prefs(ctx).edit().putBoolean(KEY_FRESH, v).apply(); changed() }
+    fun setFloatingControl(ctx: Context, v: Boolean) { floatingControl = v; prefs(ctx).edit().putBoolean(KEY_FLOAT, v).apply(); changed() }
+    fun setBubblePos(ctx: Context, right: Boolean, yFrac: Float) {
+        bubbleRight = right; bubbleYFrac = yFrac.coerceIn(0f, 1f)
+        prefs(ctx).edit().putBoolean(KEY_BUBBLE_RIGHT, right).putFloat(KEY_BUBBLE_Y, bubbleYFrac).apply()
     }
 
     fun setModelBaseUrl(ctx: Context, v: String) {
@@ -97,20 +132,20 @@ object AppSettings {
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    fun setSceneGuard(ctx: Context, v: Boolean) { sceneGuard = v; prefs(ctx).edit().putBoolean(KEY_GUARD, v).apply() }
-    fun setAppearanceGuard(ctx: Context, v: Boolean) { appearanceGuard = v; prefs(ctx).edit().putBoolean(KEY_APPEAR, v).apply() }
-    fun setScrollGuard(ctx: Context, v: Boolean) { scrollGuard = v; prefs(ctx).edit().putBoolean(KEY_SCROLL, v).apply() }
-    fun setGridBoost(ctx: Context, v: Boolean) { gridBoost = v; prefs(ctx).edit().putBoolean(KEY_GRID, v).apply() }
-    fun setDebugHud(ctx: Context, v: Boolean) { debugHud = v; prefs(ctx).edit().putBoolean(KEY_HUD, v).apply() }
-    fun setCsvLog(ctx: Context, v: Boolean) { csvLog = v; prefs(ctx).edit().putBoolean(KEY_CSV, v).apply() }
-    fun setBackend(ctx: Context, v: String) { backend = v; prefs(ctx).edit().putString(KEY_BACKEND, v).apply() }
+    fun setSceneGuard(ctx: Context, v: Boolean) { sceneGuard = v; prefs(ctx).edit().putBoolean(KEY_GUARD, v).apply(); changed() }
+    fun setAppearanceGuard(ctx: Context, v: Boolean) { appearanceGuard = v; prefs(ctx).edit().putBoolean(KEY_APPEAR, v).apply(); changed() }
+    fun setScrollGuard(ctx: Context, v: Boolean) { scrollGuard = v; prefs(ctx).edit().putBoolean(KEY_SCROLL, v).apply(); changed() }
+    fun setGridBoost(ctx: Context, v: Boolean) { gridBoost = v; prefs(ctx).edit().putBoolean(KEY_GRID, v).apply(); changed() }
+    fun setDebugHud(ctx: Context, v: Boolean) { debugHud = v; prefs(ctx).edit().putBoolean(KEY_HUD, v).apply(); changed() }
+    fun setCsvLog(ctx: Context, v: Boolean) { csvLog = v; prefs(ctx).edit().putBoolean(KEY_CSV, v).apply(); changed() }
+    fun setBackend(ctx: Context, v: String) { backend = v; prefs(ctx).edit().putString(KEY_BACKEND, v).apply(); changed() }
     const val MAX_LEAD = 60
-    fun setExtraLead(ctx: Context, v: Int) { extraLeadMs = v; prefs(ctx).edit().putInt(KEY_LEAD, v).apply() }
-    fun setPixelDp(ctx: Context, v: Int) { pixelDp = v.coerceIn(PIXEL_MIN_DP, PIXEL_MAX_DP); prefs(ctx).edit().putInt(KEY_PIXEL, pixelDp).apply() }
+    fun setExtraLead(ctx: Context, v: Int) { extraLeadMs = v; prefs(ctx).edit().putInt(KEY_LEAD, v).apply(); changed() }
+    fun setPixelDp(ctx: Context, v: Int) { pixelDp = v.coerceIn(PIXEL_MIN_DP, PIXEL_MAX_DP); prefs(ctx).edit().putInt(KEY_PIXEL, pixelDp).apply(); changed() }
     /** dp on screen -> capture px */
     fun blockCapturePx(dp: Int, density: Float, captureW: Int, screenW: Int): Float =
         dp * density * captureW / kotlin.math.max(1, screenW).toFloat()
-    fun setModel(ctx: Context, v: ModelSize) { model = v; prefs(ctx).edit().putString(KEY_MODEL, v.id).apply() }
+    fun setModel(ctx: Context, v: ModelSize) { model = v; prefs(ctx).edit().putString(KEY_MODEL, v.id).apply(); changed() }
 }
 
 /** Running flag + listener so the activity can refresh its button. */
@@ -118,6 +153,8 @@ object ServiceState {
     @Volatile var running = false
         private set
     @Volatile var lastError: String? = null
+    /** v1.7: censoring paused from the floating control (pipeline keeps running, so resume is instant) */
+    @Volatile var paused = false
     private val listeners = ArrayList<() -> Unit>()
 
     fun set(v: Boolean) {
@@ -128,4 +165,6 @@ object ServiceState {
 
     fun addListener(l: () -> Unit) = synchronized(listeners) { listeners.add(l) }
     fun removeListener(l: () -> Unit) = synchronized(listeners) { listeners.remove(l) }
+    /** state other than running changed (pause) */
+    fun changed() = set(running)
 }

@@ -49,6 +49,9 @@ class CaptureService : Service() {
     private var vsyncMs = 16.6f
     private var renderer: OverlayRenderer? = null
     private val main = Handler(Looper.getMainLooper())
+    private var floating: FloatingControl? = null
+    /** AppSettings changed (UI thread): bubble on/off, HUD on/off, menu labels */
+    private val settingsListener: () -> Unit = { main.post { syncUi() } }
     private var windowCtx: Context? = null
 
     /** Size of the captured content reported by onCapturedContentResize (px), or 0. */
@@ -163,7 +166,10 @@ class CaptureService : Service() {
 
         r.showProbe()
         ServiceState.lastError = null
+        ServiceState.paused = false
         ServiceState.set(true)
+        AppSettings.addListener(settingsListener)
+        syncUi()
         if (AppSettings.debugHud) r.showHud("Veil: starting… (${Backends.RUNTIME})")
     }
 
@@ -176,6 +182,46 @@ class CaptureService : Service() {
         p.censor = AppSettings.censor
         p.blockPx = AppSettings.blockCapturePx(AppSettings.pixelDp, resources.displayMetrics.density, capW, screenW)
         p.extraLeadMs = AppSettings.extraLeadMs.toFloat()
+        p.freshWaitEnabled = AppSettings.freshWait
+    }
+
+    // ---- v1.7 floating control (main thread) ----
+
+    private fun syncUi() {
+        if (stopping || projection == null) return
+        val want = AppSettings.floatingControl
+        if (want && floating == null) {
+            val ctx = windowCtx ?: return
+            floating = FloatingControl(ctx, renderer, object : FloatingControl.Actions {
+                override fun togglePause() = setPaused(!ServiceState.paused)
+                override fun switchModel(m: ModelSize) {
+                    AppSettings.setModel(this@CaptureService, m)
+                    this@CaptureService.switchModel()
+                }
+                override fun stop() = shutdown()
+                override fun openApp() {
+                    startActivity(Intent(this@CaptureService, MainActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+                }
+            }).also { it.show() }
+        } else if (!want && floating != null) {
+            floating?.hide(); floating = null
+            if (ServiceState.paused) setPaused(false) // never leave censoring paused without its indicator
+        }
+        floating?.refresh()
+        // HUD off applies at once; HUD on appears with the next stats line (every 0.5 s)
+        if (!AppSettings.debugHud) renderer?.showHud(null)
+    }
+
+    /** Pause / resume censoring. The pipeline keeps running; only what is shown changes, instantly. */
+    private fun setPaused(v: Boolean) {
+        if (ServiceState.paused == v) return
+        ServiceState.paused = v
+        // one hop to the capture thread so it lands after any frame being processed right now
+        worker?.post { pipeline?.let { if (v) it.blankNow() else it.republishNow() } }
+        floating?.refresh()
+        ServiceState.changed()
+        try { getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification()) } catch (_: Throwable) {}
     }
 
     private fun buildPipeline(model: ModelSize, r: OverlayRenderer, h: Handler): Pipeline {
@@ -325,6 +371,7 @@ class CaptureService : Service() {
             }
         }
         reconfigure()
+        floating?.onDisplayChanged()
     }
 
     private fun showHud(text: String?) {
@@ -335,6 +382,9 @@ class CaptureService : Service() {
     private fun shutdown() {
         if (stopping) return
         stopping = true
+        AppSettings.removeListener(settingsListener)
+        floating?.hide(); floating = null
+        ServiceState.paused = false
         ServiceState.set(false)
         val mp = projection
         projection = null
@@ -390,7 +440,7 @@ class CaptureService : Service() {
         return Notification.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(getString(R.string.notif_title))
-            .setContentText(getString(R.string.notif_text))
+            .setContentText(getString(if (ServiceState.paused) R.string.notif_paused else R.string.notif_text))
             .setOngoing(true)
             .setContentIntent(open)
             .setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)

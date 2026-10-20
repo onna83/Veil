@@ -98,6 +98,12 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
             out[4 * n] = d.x1; out[4 * n + 1] = d.y1; out[4 * n + 2] = d.x2; out[4 * n + 3] = d.y2
             n++
         }
+        val ui = uiRects
+        var k = 0
+        while (k + 3 < ui.size && n < maxN) {
+            out[4 * n] = ui[k]; out[4 * n + 1] = ui[k + 1]; out[4 * n + 2] = ui[k + 2]; out[4 * n + 3] = ui[k + 3]
+            n++; k += 4
+        }
         return n
     }
 
@@ -336,36 +342,75 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
 
     // ---- debug HUD ----
 
+    private var hudText: String? = null
+    /** HUD starts collapsed to its first line (model · det fps · e2e); tap toggles */
+    var hudExpanded = false
+        private set
+
     fun showHud(text: String?) {
         if (released) return
+        hudText = text
         if (text == null) {
             hud?.let { try { wm.removeView(it) } catch (_: Exception) {} }
             hud = null
+            hudRect.setEmpty(); publishUiRects()
             return
         }
         var v = hud
         if (v == null) {
-            v = TextView(ctx).apply {
-                setTextColor(Color.WHITE)
-                setBackgroundColor(Color.argb(200, 0, 0, 0))
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-                typeface = android.graphics.Typeface.MONOSPACE
-                val p = (4 * resources.displayMetrics.density).toInt()
-                setPadding(p, p, p, p)
+            val d = ctx.resources.displayMetrics.density
+            v = makeHudView(ctx).apply {
+                setOnClickListener { hudExpanded = !hudExpanded; renderHudText() }
+                addOnLayoutChangeListener { vv, _, _, _, _, _, _, _, _ -> trackHudRect(vv) }
             }
+            // touchable (tap = expand/collapse) but only within its own bounds; not focusable,
+            // so every touch outside goes to the app underneath
             val lp = baseParams(
                 WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
                 PixelFormat.TRANSLUCENT,
             ).apply {
+                flags = flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
                 title = "Veil HUD"
-                x = (8 * ctx.resources.displayMetrics.density).toInt()
-                y = (48 * ctx.resources.displayMetrics.density).toInt()
-                // <= 0.8 so touches still pass through (Android 12+ rule)
-                alpha = 0.75f
+                x = (8 * d).toInt()
+                y = (48 * d).toInt()
             }
             try { wm.addView(v, lp); hud = v } catch (e: Exception) { Log.w(TAG, "hud", e); return }
         }
-        v.text = text
+        renderHudText()
+    }
+
+    private fun renderHudText() {
+        val v = hud ?: return
+        val t = hudText ?: return
+        v.text = if (hudExpanded) t else hudCollapsed(t)
+    }
+
+    private fun trackHudRect(v: View) {
+        val loc = IntArray(2); v.getLocationOnScreen(loc)
+        hudRect.set(loc[0], loc[1], loc[0] + v.width, loc[1] + v.height)
+        publishUiRects()
+    }
+
+    // ---- our own non-censor UI (HUD, floating control): masked like our censors ----
+    private val hudRect = Rect()
+    private val extraUi = ArrayList<Rect>()
+    /** capture-coordinate rects [x1,y1,x2,y2]*n, replaced atomically (read on the capture thread) */
+    @Volatile private var uiRects = FloatArray(0)
+
+    /** our HUD / floating-control rects in capture coordinates (any thread) */
+    fun uiRectsNow(): FloatArray = uiRects
+
+    /** Main thread: screen rects of other own UI windows (floating control); empty list = none. */
+    fun setUiRects(rects: List<Rect>) {
+        extraUi.clear(); extraUi.addAll(rects.map { Rect(it) })
+        publishUiRects()
+    }
+
+    private fun publishUiRects() {
+        val all = ArrayList<Rect>(extraUi.size + 1)
+        if (!hudRect.isEmpty) all.add(hudRect)
+        all.addAll(extraUi)
+        uiRects = screenToCapture(all, contentRect, frameW, frameH)
     }
 
     fun release() {
@@ -464,6 +509,37 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
         private fun ema(old: Float, v: Float) = if (old == 0f) v else old * 0.9f + v * 0.1f
 
         /** Probe location in capture pixels: left edge, mid-height. [x1,y1,x2,y2] */
+        /** the HUD text view (shared with the screenshot test) */
+        fun makeHudView(ctx: Context): TextView = TextView(ctx).apply {
+            val d = ctx.resources.displayMetrics.density
+            setTextColor(Color.WHITE)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.argb(215, 18, 12, 14)); cornerRadius = 10 * d
+            }
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            typeface = android.graphics.Typeface.MONOSPACE
+            val ph = (8 * d).toInt(); val pv = (5 * d).toInt()
+            setPadding(ph, pv, ph, pv)
+        }
+
+        /** collapsed HUD = its first line */
+        fun hudCollapsed(text: String): String = text.substringBefore('\n')
+
+        /** screen rects -> capture-frame rects (the capture shows [content] scaled to fw x fh) */
+        fun screenToCapture(rects: List<Rect>, content: Rect, fw: Int, fh: Int): FloatArray {
+            if (fw <= 0 || fh <= 0 || content.width() <= 0 || content.height() <= 0) return FloatArray(0)
+            val sx = fw.toFloat() / content.width(); val sy = fh.toFloat() / content.height()
+            val out = ArrayList<Float>()
+            for (r in rects) {
+                val x1 = ((r.left - content.left) * sx).coerceIn(0f, fw.toFloat())
+                val y1 = ((r.top - content.top) * sy).coerceIn(0f, fh.toFloat())
+                val x2 = ((r.right - content.left) * sx).coerceIn(0f, fw.toFloat())
+                val y2 = ((r.bottom - content.top) * sy).coerceIn(0f, fh.toFloat())
+                if (x2 - x1 >= 1f && y2 - y1 >= 1f) { out.add(x1); out.add(y1); out.add(x2); out.add(y2) }
+            }
+            return out.toFloatArray()
+        }
+
         fun probeRect(fw: Int, fh: Int): FloatArray {
             val s = CaptureProbe.SIZE.toFloat()
             val y = fh / 2f - s / 2f

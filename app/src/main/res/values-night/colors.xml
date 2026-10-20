@@ -1,0 +1,33 @@
+<resources>
+    <color name="m3_primary">#FFB4A2</color>
+    <color name="m3_on_primary">#5E1708</color>
+    <color name="m3_primary_container">#7D2C1B</color>
+    <color name="m3_on_primary_container">#FFDBD2</color>
+    <color name="m3_secondary">#E7BDB3</color>
+    <color name="m3_on_secondary">#442A23</color>
+    <color name="m3_secondary_container">#5D3F38</color>
+    <color name="m3_on_secondary_container">#FFDBD2</color>
+    <color name="m3_tertiary">#D8C68F</color>
+    <color name="m3_on_tertiary">#3B2F05</color>
+    <color name="m3_tertiary_container">#53461A</color>
+    <color name="m3_on_tertiary_container">#F5E1A7</color>
+    <color name="m3_error">#FFB4AB</color>
+    <color name="m3_on_error">#690005</color>
+    <color name="m3_error_container">#93000A</color>
+    <color name="m3_on_error_container">#FFDAD6</color>
+    <color name="m3_surface">#1A110F</color>
+    <color name="m3_on_surface">#F1DFDA</color>
+    <color name="m3_surface_variant">#53433F</color>
+    <color name="m3_on_surface_variant">#D8C2BC</color>
+    <color name="m3_outline">#A08C87</color>
+    <color name="m3_outline_variant">#53433F</color>
+    <color name="m3_surface_lowest">#140C0A</color>
+    <color name="m3_surface_low">#231917</color>
+    <color name="m3_surface_container">#271D1B</color>
+    <color name="m3_surface_high">#322825</color>
+    <color name="m3_surface_highest">#3D3230</color>
+    <color name="m3_inverse_surface">#F1DFDA</color>
+    <color name="m3_inverse_on_surface">#392E2B</color>
+    <color name="m3_inverse_primary">#9C4330</color>
+    <color name="status_on">#7FD8A0</color>
+</resources>

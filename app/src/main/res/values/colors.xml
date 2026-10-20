@@ -1,3 +1,35 @@
 <resources>
     <color name="ic_bg">#2B1E3F</color>
+    <!-- Material 3 scheme from the peach seed (#F27459), light -->
+    <color name="m3_primary">#9C4330</color>
+    <color name="m3_on_primary">#FFFFFF</color>
+    <color name="m3_primary_container">#FFDBD2</color>
+    <color name="m3_on_primary_container">#3E0500</color>
+    <color name="m3_secondary">#77574F</color>
+    <color name="m3_on_secondary">#FFFFFF</color>
+    <color name="m3_secondary_container">#FFDBD2</color>
+    <color name="m3_on_secondary_container">#2C1510</color>
+    <color name="m3_tertiary">#6C5D2F</color>
+    <color name="m3_on_tertiary">#FFFFFF</color>
+    <color name="m3_tertiary_container">#F5E1A7</color>
+    <color name="m3_on_tertiary_container">#231B00</color>
+    <color name="m3_error">#BA1A1A</color>
+    <color name="m3_on_error">#FFFFFF</color>
+    <color name="m3_error_container">#FFDAD6</color>
+    <color name="m3_on_error_container">#410002</color>
+    <color name="m3_surface">#FFF8F6</color>
+    <color name="m3_on_surface">#231917</color>
+    <color name="m3_surface_variant">#F5DED8</color>
+    <color name="m3_on_surface_variant">#53433F</color>
+    <color name="m3_outline">#85736E</color>
+    <color name="m3_outline_variant">#D8C2BC</color>
+    <color name="m3_surface_lowest">#FFFFFF</color>
+    <color name="m3_surface_low">#FFF1ED</color>
+    <color name="m3_surface_container">#FCEAE5</color>
+    <color name="m3_surface_high">#F7E4DF</color>
+    <color name="m3_surface_highest">#F1DFDA</color>
+    <color name="m3_inverse_surface">#392E2B</color>
+    <color name="m3_inverse_on_surface">#FFEDE9</color>
+    <color name="m3_inverse_primary">#FFB4A2</color>
+    <color name="status_on">#2E7D4F</color>
 </resources>

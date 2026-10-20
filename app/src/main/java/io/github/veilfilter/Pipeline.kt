@@ -88,6 +88,8 @@ class Pipeline(
     @Volatile var sceneGuardEnabled = true
     /** pre-emptive strip at the scroll-entry edge (off by default since v1.3) */
     @Volatile var scrollGuardEnabled = false
+    /** v1.6.1 fresh-frame wait; switchable since v1.7 (Performance screen) */
+    @Volatile var freshWaitEnabled = true
     /** small images / grid boost (tiled passes) */
     @Volatile var gridBoostEnabled = true
     val tiles = TileScheduler()
@@ -469,10 +471,13 @@ class Pipeline(
             tracker.applyClasses(cfg.mask, cfg.start, cfg.keep, cfg.fastKeep)
             appliedCensor = cfg
         }
-        // drop detections decoded under a previous class set
+        // drop detections decoded under a previous class set, and (full-screen capture,
+        // where our own UI is in the frame) anything that is mostly our HUD / floating control
+        val ui = if (probe.mode != CaptureProbe.Mode.SINGLE_APP) renderer.uiRectsNow() else NO_RECTS
         var kept = 0
         for (i in 0 until r.count) {
             if (!cfg.mask[r.cls[i]]) continue
+            if (ui.isNotEmpty() && mostlyInside(r.x1[i], r.y1[i], r.x2[i], r.y2[i], ui)) continue
             r.x1[kept] = r.x1[i]; r.y1[kept] = r.y1[i]; r.x2[kept] = r.x2[i]; r.y2[kept] = r.y2[i]
             r.score[kept] = r.score[i]; r.cls[kept] = r.cls[i]; r.clipped[kept] = r.clipped[i]
             kept++
@@ -663,7 +668,20 @@ class Pipeline(
             Pixelator.sampleBlocks(frame, fw, fh, stride, x1, y1, x2, y2, cols, rows, c)
             out.add(CensorBox(APPEAR_ID_BASE - b.id, x1, y1, x2, y2, gvx, gvy, tCap, cols, rows, c))
         }
+        // v1.7 pause (floating control): everything above still runs (tracks, pixel
+        // caches stay warm), only nothing is shown, so resume is instant
+        if (ServiceState.paused) out.clear()
         renderer.submit(RenderState(fw, fh, out, tCap, System.nanoTime()))
+    }
+
+    /** Capture thread (post it there): show nothing now, without waiting for a new frame. */
+    fun blankNow() {
+        if (fw > 0) renderer.submit(RenderState(fw, fh, ArrayList(), lastCap, System.nanoTime()))
+    }
+
+    /** Capture thread (post it there): re-publish current tracks now (instant resume on a static screen). */
+    fun republishNow() {
+        if (fw > 0 && lastCap > 0) publish(lastCap, null)
     }
 
     // ======================================================================
@@ -691,7 +709,7 @@ class Pipeline(
                             // average this lowers detection age by ~1/3 interval (see README).
                             val iv = capIntervalShared
                             val cand = s
-                            if (!cand.cut && waitedFor != cand.frameId) {
+                            if (freshWaitEnabled && !cand.cut && waitedFor != cand.frameId) {
                                 val waitMs = FreshWait.timeoutMs((System.nanoTime() - cand.readyNs) / 1e6f, iv)
                                 if (waitMs > 0) {
                                     waitedFor = cand.frameId
@@ -796,7 +814,7 @@ class Pipeline(
             if (!shift.gridLike) "idle (no grid)" else if (tiles.bigContent || lastCap < tiles.bigUntilMs) "idle (large subject)" else "grid",
             tiles.tiles.size, tiles.tiles.firstOrNull()?.side ?: 0, tiles.hotCount(), fps, tps, tiles.cycleMsEma,
         )
-        val hud = String.format(
+        val hud = hudCompact(model.id, detFps, detPath, ServiceState.paused) + "\n" + String.format(
             java.util.Locale.US,
             "%s | model %s | %s\ncapture: %s | %.0f x %d\n" +
                 "cap %.1f fps (int %.1f) deliver %.1f copy %.2f\n" +
@@ -845,6 +863,22 @@ class Pipeline(
         private const val READY = 2
         private const val INFER = 3
         fun nowMs() = System.nanoTime() / 1_000_000L
+        private val NO_RECTS = FloatArray(0)
+        /** true if >= 60 % of the box lies inside one of [rects] ([x1,y1,x2,y2]*n) */
+        fun mostlyInside(x1: Float, y1: Float, x2: Float, y2: Float, rects: FloatArray): Boolean {
+            val a = max(0f, x2 - x1) * max(0f, y2 - y1)
+            if (a <= 0f) return false
+            var k = 0
+            while (k + 3 < rects.size) {
+                val iw = min(x2, rects[k + 2]) - max(x1, rects[k]); val ih = min(y2, rects[k + 3]) - max(y1, rects[k + 1])
+                if (iw > 0f && ih > 0f && iw * ih >= 0.6f * a) return true
+                k += 4
+            }
+            return false
+        }
+        /** first HUD line = the collapsed HUD: model, detector fps, detector e2e estimate */
+        fun hudCompact(model: String, detFps: Float, e2eMs: Float, paused: Boolean = false): String =
+            String.format(java.util.Locale.US, "%s · det %.0f fps · e2e %.0f ms%s", model, detFps, e2eMs, if (paused) " · PAUSED" else "")
         private fun f1(v: Float) = String.format(java.util.Locale.US, "%.1f", v)
         private fun f2(v: Float) = String.format(java.util.Locale.US, "%.2f", v)
     }

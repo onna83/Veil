@@ -1,4 +1,4 @@
-# Veil (v1.6.1)
+# Veil (v1.7)
 
 Veil is a free, open-source, **fully on-device** nudity filter for Android 14+.
 It watches the screen with MediaProjection, runs the NudeNet v3 detector
@@ -14,6 +14,73 @@ translations.
 > **Status:** v1 ran on a Galaxy S23 FE (censoring works; visible lag while
 > scrolling). v1.1 targets that scroll lag. It compiles and its core logic is
 > unit-tested on the JVM, but **v1.1 has not run on a device yet.**
+
+## What's new in v1.7 (clean UI, floating control)
+
+**Main screen** (Material 3, light and dark): app name and icon, then a
+protection card with one Start/Stop button, a status line ("Protection is
+on/off/paused") and the hint to pick "A single app". The floating control
+switch is in this card too. Below that:
+- a **What to censor** card: Exposed, Covered, Belly, Male chest and Faces.
+  Female/Male faces appear only while Faces is on;
+- a **Censor** card: the pixel size slider and a live preview at that size
+  (left third original, the rest pixelated as the overlay will do it);
+- a short list to the secondary screens.
+
+Secondary screens, each with a back arrow:
+
+| screen | contents |
+|---|---|
+| Detection model | Models grouped as TFLite (GPU) and official ONNX (CPU). One primary action per row (Download / Resume / Cancel / Use; none on the model in use). Size and speed note as secondary text. Delete is in the row's ⋮ menu. *Import model file…* and *Model host URL…* are in the top-bar overflow. One-line network note in the footer. |
+| Performance | Backend (Auto / GPU OpenCL / GPU GL / CPU, picked in a dialog) and NNAPI for ONNX (classic build only). Benchmark. Grid boost, fresh-frame wait (new switch, default on = v1.6.1 behaviour), scroll prediction slider. Guards: scene-cut, skin (appearance), scroll-entry strip. |
+| Debug | Debug HUD (default off; an existing value is kept) and timing log (VeilCSV). |
+| About | Version, runtime, licence (AGPL-3.0-or-later), NudeNet credit, privacy, network, capture mode, limits. |
+
+The permission buttons are gone: Start asks for overlay and notification
+permission when needed, as before. All settings use the same keys, so
+existing values carry over, and they apply live exactly as before. There
+was no separate 256 switch left; the pre-1.5 `fast256` value still migrates
+to the 320n@256 model.
+
+**HUD** starts collapsed to one line (`model · det fps · e2e ms`, plus
+`PAUSED` when paused). Tap it to expand the full text and tap again to
+collapse. It is touchable only within its own bounds.
+
+**Floating control** (default on, switch on the main screen). This is a
+small bubble shown only while protection runs:
+- drag it and it snaps to the nearer side edge; its side and height are
+  remembered;
+- it fades to 35 % when idle;
+- tap it for a 4x2 menu:
+  - Pause/Resume. Paused shows an amber bubble with pause bars, `PAUSED` in
+    the HUD and a notification note. The pipeline keeps running while
+    paused, so resume is instant;
+  - Model. Lists the bundled and downloaded models and switches with the
+    existing live hot-swap (full-screen pixelation until the first
+    detection);
+  - Pixel size (cycles 6/10/16/24/32 dp);
+  - Faces, Covered, HUD, Settings, Stop;
+- a tap outside closes the menu without consuming the tap.
+
+Both windows are NOT_FOCUSABLE, so touches outside them go to the app
+underneath. All the UI work is on the main thread from user input. The
+capture and detector threads only get a one-shot re-publish on
+pause/resume. In full-screen capture, the bubble, the menu and the HUD are
+registered with the renderer like Veil's own censors: they are masked from
+the shift, scene and skin guards, and detections lying >= 60 % on them are
+dropped. In single-app capture they aren't captured at all. The bubble glyph
+is neutral grey.
+
+Build: Material 3 needs Material Components and AppCompat. To keep the
+classic zip under 25 MB, debug builds are now **shrunk with R8 without
+obfuscation** (`app/proguard-rules.pro` keeps all Veil classes and the
+ONNX Runtime / TFLite / LiteRT JNI classes whole). The androidx-added
+`DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION` is removed, so the permissions
+are unchanged from v1.6.1.
+
+Screenshots: `ScreensTest` (Robolectric, native graphics) renders every
+screen in light and dark, plus the bubble, menu, model list, paused state
+and HUD. Output goes to `$VEIL_SCREENS_DIR`, default `app/build/veil-screens`.
 
 ## What's new in v1.6.1 (latency: boxes follow motion again)
 

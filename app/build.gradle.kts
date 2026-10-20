@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.veilfilter"
         minSdk = 34
         targetSdk = 35
-        versionCode = 9
-        versionName = "1.6.1"
+        versionCode = 10
+        versionName = "1.7.0"
         ndk {
             // Android 14+ phones are arm64. Add "x86_64" here to run on an emulator.
             abiFilters += listOf("arm64-v8a")
@@ -41,6 +41,12 @@ android {
         release {
             isMinifyEnabled = false
         }
+        debug {
+            // v1.7: shrink only (no obfuscation, see proguard-rules.pro). Material/AppCompat
+            // would otherwise add ~7.7 MB of dex and push the classic zip past 25 MB.
+            isMinifyEnabled = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
     }
 
     compileOptions {
@@ -59,8 +65,16 @@ android {
         }
     }
 
+    lint {
+        // lifecycle's bundled NonNullableMutableLiveDataDetector crashes this lint version
+        // (IncompatibleClassChangeError); Veil uses no LiveData
+        disable += "NullSafeMutableLiveData"
+    }
+
     testOptions {
         unitTests.isReturnDefaultValues = true
+        // Robolectric screenshot tests (ScreensTest) render the real layouts/theme
+        unitTests.isIncludeAndroidResources = true
     }
 }
 
@@ -87,5 +101,10 @@ dependencies {
     // ONNX Runtime: runs the official NudeNet .onnx files (downloaded on demand)
     // classic only: +12.9 MB compressed would push the litert2 zip past 25 MB
     "classicImplementation"("com.microsoft.onnxruntime:onnxruntime-android:1.31.0")
+    // v1.7 UI: Material 3 components (MaterialSwitch, Slider, cards, toolbar)
+    implementation("com.google.android.material:material:1.12.0")
+    implementation("androidx.appcompat:appcompat:1.7.0")
     testImplementation("junit:junit:4.13.2")
+    // screenshot tests of the settings screens (native graphics, JVM only)
+    testImplementation("org.robolectric:robolectric:4.14.1")
 }
