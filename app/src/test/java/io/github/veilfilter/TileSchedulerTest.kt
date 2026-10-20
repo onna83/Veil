@@ -43,13 +43,14 @@ class TileSchedulerTest {
         val g = grid(setOf(7), s, cols, rows)
         var now = 0L
         val seq = ArrayList<Int>()
-        repeat(6) {
+        repeat(7) {
             s.observe(g, cols, rows, cell, 0.0, 0.0, now)
             seq.add(s.next(now, 0.0, 0.0)); now += 20
         }
-        // F, T7, then full passes while nothing is hot; the 4th pass sweeps a never-visited (cold) tile
-        assertEquals(listOf(-1, 7, -1, -1, -1), seq.subList(0, 5))
-        assertTrue(seq[5] >= 0 && seq[5] != 7)
+        // v1.6.1: F, F, T7 (full passes keep >= 2/3), then full passes while nothing is hot;
+        // the 4th pass after the tile sweeps a never-visited (cold) tile
+        assertEquals(listOf(-1, -1, 7, -1, -1, -1), seq.subList(0, 6))
+        assertTrue(seq[6] >= 0 && seq[6] != 7)
     }
 
     @Test
@@ -60,9 +61,11 @@ class TileSchedulerTest {
         val g = grid(setOf(3), s, cols, rows)
         var now = 0L
         s.observe(g, cols, rows, cell, 0.0, 0.0, now); s.next(now, 0.0, 0.0); now += 20
+        s.observe(g, cols, rows, cell, 0.0, 0.0, now); assertEquals(-1, s.next(now, 0.0, 0.0)); now += 20
         s.observe(g, cols, rows, cell, 0.0, 0.0, now); assertEquals(3, s.next(now, 0.0, 0.0)); now += 200
-        // scrolled by more than 10 % of a tile: hot again
+        // scrolled by more than 10 % of a tile: hot again (after 2 full passes)
         s.observe(g, cols, rows, cell, 0.0, -50.0, now)
+        assertEquals(-1, s.next(now, 0.0, -50.0)); now += 20
         assertEquals(-1, s.next(now, 0.0, -50.0)); now += 20
         assertEquals(3, s.next(now, 0.0, -50.0)); now += 20
         // nothing hot: cold tiles only after coldRevisitMs, one per coldEvery passes
@@ -85,5 +88,26 @@ class TileSchedulerTest {
         assertEquals(-1, s.next(20, 0.0, 0.0))
         s.enabled = false
         repeat(5) { assertEquals(-1, s.next(40L + it * 20, 0.0, 0.0)) }
+    }
+
+    @Test
+    fun v161NoTilesWithoutGridOrWithLargeSubject() {
+        val s = TileScheduler(); s.layout(590, 1280)
+        val cols = 590 / cell; val rows = 1280 / cell
+        val g = grid(setOf(2, 5), s, cols, rows)
+        var now = 0L
+        // full-screen video: not grid-like -> never a tile, however hot
+        s.gridLike = false
+        repeat(50) { s.observe(g, cols, rows, cell, 0.0, now * -1.0, now); assertEquals(-1, s.next(now, 0.0, now * -1.0)); now += 20 }
+        // grid, but a full pass just found a large subject: held off for BIG_HOLD_MS
+        s.gridLike = true
+        s.noteBig(now)
+        val until = now + TileScheduler.BIG_HOLD_MS
+        while (now < until) { s.observe(g, cols, rows, cell, 0.0, 0.0, now); assertEquals(-1, s.next(now, 0.0, 0.0)); now += 20 }
+        // afterwards tiles come back, with full passes >= 2/3
+        var t = 0; var f = 0
+        repeat(90) { s.observe(g, cols, rows, cell, 0.0, -now.toDouble(), now); if (s.next(now, 0.0, -now.toDouble()) >= 0) t++ else f++; now += 20 }
+        assertTrue("tiles resumed: $t", t > 0)
+        assertTrue("full share ${f}/${t + f}", f * 3 >= 2 * (t + f))
     }
 }

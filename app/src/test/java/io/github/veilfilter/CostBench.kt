@@ -8,7 +8,7 @@ import kotlin.random.Random
 class CostBench {
     @Test
     fun bench() {
-        assumeTrue(System.getenv("VEIL_BENCH") == "1")
+        assumeTrue(System.getenv("VEIL_BENCH") == "1" || java.io.File("/tmp/veil_bench").exists())
         for ((w, h) in listOf(443 to 960, 590 to 1280)) {
             val s = w * 4; val f = ByteArray(s * h).also { Random(1).nextBytes(it) }
             val pre = Preprocessor(320); val sh = ShiftEstimator(); val sg = SceneGuard(); val ag = AppearanceGuard()

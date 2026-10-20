@@ -45,6 +45,15 @@ class TileScheduler(
     private var passesSinceTile = 0
     private var forceFull = false
     @Volatile var bigContent = false
+    /**
+     * v1.6.1: the frame looks like a grid of small images (fed every frame from
+     * [ShiftEstimator.gridLike]). Tiles never run otherwise: full-screen video
+     * or a single large photo keep 100 % of the detector for full-frame passes.
+     */
+    @Volatile var gridLike = true
+    /** no tiles until this time after a full pass found large content */
+    @Volatile var bigUntilMs = Long.MIN_VALUE / 2
+    fun noteBig(nowMs: Long) { bigUntilMs = nowMs + BIG_HOLD_MS }
 
     // stats
     var tilePasses = 0; private set
@@ -92,8 +101,10 @@ class TileScheduler(
     /** Capture thread: which region to prepare next. No side effects. */
     @Synchronized fun peek(nowMs: Long): Int {
         if (!enabled || tiles.isEmpty() || forceFull) return -1
+        if (!gridLike || bigContent || nowMs < bigUntilMs) return -1
         val anyHot = tiles.any { it.hot }
-        val needFullFirst = if (anyHot) (if (bigContent) 2 else 1) else coldEvery - 1
+        // full passes keep >= 2/3 of the detector even on a grid
+        val needFullFirst = if (anyHot) 2 else coldEvery - 1
         if (passesSinceTile < needFullFirst) return -1
         var best = -1; var bestScore = -1.0
         for ((k, t) in tiles.withIndex()) {
@@ -131,6 +142,7 @@ class TileScheduler(
     }
 
     companion object {
+        const val BIG_HOLD_MS = 1500L
         const val SKIN_CELL = 0.4f
         const val MIN_SKIN_FRACTION = 0.03f
         private fun ema(o: Float, v: Float) = if (o == 0f) v else o * 0.8f + v * 0.2f

@@ -1,4 +1,4 @@
-# Veil (v1.6)
+# Veil (v1.6.1)
 
 Veil is a free, open-source, **fully on-device** nudity filter for Android 14+.
 It watches the screen with MediaProjection, runs the NudeNet v3 detector
@@ -14,6 +14,57 @@ translations.
 > **Status:** v1 ran on a Galaxy S23 FE (censoring works; visible lag while
 > scrolling). v1.1 targets that scroll lag. It compiles and its core logic is
 > unit-tested on the JVM, but **v1.1 has not run on a device yet.**
+
+## What's new in v1.6.1 (latency: boxes follow motion again)
+
+On-phone HUD (S23 FE, Reels, 320n GPU) before the fix: shift 16.4 ms,
+analyze+publish 17.7 ms, post 10.0 ms, queue 10.4 ms, detector e2e 103 ms,
+tiles 7.8/s on a full-screen video, and boxes trailing a dancing body.
+
+- **Shift estimator rewritten** (`ShiftEstimator.kt`). The old code was
+  unchanged since v1.2, but its cost grows with capture size: profile
+  reads scale with h·w and the search with h². The 1280-px capture
+  added in v1.3 for grid boost made it ~2.5x more work than at 960. Its
+  row pass also read every 8th pixel of every row (32-byte steps), so it
+  touched all ~53k cache lines of the 3 MB frame on every frame. On the
+  phone (GPU saturating memory) that pass, not the arithmetic, is the
+  likely cost: the other passes on the same thread are within 1.3–3x of the
+  box, the old shift was ~36x. Changes:
+  - rows at half vertical resolution;
+  - 3 one-cache-line stripes per band;
+  - columns every 2nd pixel, every 16th row;
+  - a 3-level search pyramid;
+  - a branch-free path when nothing is masked;
+  - V-fit sub-pixel interpolation.
+  Accuracy is unchanged (worst 0.02 px in the 590x1280 test). It is self-tuning: if the
+  measured EMA exceeds 2 ms it switches to "lite" (rows every 4th, columns
+  every 32nd row) and back below 0.6 ms. The HUD shows `shift X (prof Y srch Z [lite])`.
+- **Tracker is motion-adaptive** (`Tracker.kt`). Measurements are timed at
+  their frame's capture time and predicted forward. Before, a detection
+  60–100 ms old was treated as "now", so a moving body always lagged by
+  speed x latency. Moving tracks get zero smoothing. Velocity and centre
+  come from a least-squares line through the last 3 detections. Motion is
+  decided from the box's *smaller* side: the old deadband of 6 % of the
+  largest side (18 px on a 300-px body) classified most dancing as
+  "still noise" and halved the velocity. Moving boxes are not snapped to
+  the pixel grid and their colours aren't blended. Still boxes keep the
+  v1.5 anti-jitter behaviour. Lead padding is halved, because prediction
+  now covers the latency.
+- **Grid boost only on grids**. Tiles run only when the frame shows narrow
+  uniform vertical gutters (found in the shift pass, debounced), never
+  within 1.5 s of a large full-frame detection, and full passes keep at
+  least 2/3 of the detector. Full-screen video and single large photos get
+  0 tiles. The HUD shows `grid boost: idle (no grid)` or
+  `idle (large subject)`.
+- **Fresh-frame wait** (`FreshWait.kt`). If the detector frees up while
+  the newest frame is already older than 0.4 x the capture interval, it
+  waits for the next frame. Mean age of the shown detection drops by about
+  3.6 ms, at a cost of ~10 % detector rate (simulated). The HUD's queue
+  line shows the wait separately.
+- Box regression tests: `V161PerfTest`, `V161MotionTest`, `FreshWaitTest`.
+  These measure shift accuracy and cost against the old estimator, the
+  capture-thread cost, gutter detection, and dancing-body lag (centre lag
+  23.9 → 11.7 px, 0 px uncovered).
 
 ## What's new in v1.6 (download and switch models in the app)
 

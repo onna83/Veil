@@ -123,6 +123,9 @@ class Pipeline(
     private val slots = arrayOf(Slot(model.px), Slot(model.px))
     @Volatile private var running = false
     private var inferThread: Thread? = null
+    // inference thread only
+    private var waitedFor = -1L
+    private var lastWaitMs = 0f
     @Volatile var backendName = "loading…"
         private set
 
@@ -131,7 +134,7 @@ class Pipeline(
         val score = FloatArray(n); val cls = IntArray(n)
         var count = 0
         var frameId = 0L; var tCap = 0L; var cumX = 0.0; var cumY = 0.0; var gen = 0; var cut = false
-        var queueMs = 0f; var inferMs = 0f; var decodeMs = 0f; var doneNs = 0L
+        var queueMs = 0f; var inferMs = 0f; var decodeMs = 0f; var doneNs = 0L; var waitMs = 0f
         var skin = FloatArray(0)
         var region = -1
         var rx = 0; var ry = 0; var rw = 0; var rh = 0
@@ -144,6 +147,10 @@ class Pipeline(
     private val mShift = Ema(); private val mGuard = Ema(); private val mAnalyze = Ema(); private val mPre = Ema()
     private val mQueue = Ema(); private val mInfer = Ema(); private val mDecode = Ema(); private val mPost = Ema()
     private val mDetAge = Ema()
+    private val mPublish = Ema(); private val mShiftProf = Ema(); private val mShiftSearch = Ema(); private val mWait = Ema()
+    private var framesSinceLite = 0
+    /** capture interval EMA, read by the inference thread (fresh-frame wait) */
+    @Volatile private var capIntervalShared = 0f
     private val mAppear = Ema()
     @Volatile private var inferMsShared = 16f
     private var capFrames = 0
@@ -254,6 +261,15 @@ class Pipeline(
         // 2. global shift: move every track (incl. occluded ones) with the page
         shift.analyze(frame, w, h, stride, excl, nExcl)
         val t1 = System.nanoTime()
+        val shiftMs = (t1 - t0) / 1e6f
+        // self-tuning: if the estimator is still expensive on this device, halve its rows
+        framesSinceLite++
+        if (framesSinceLite > 60) {
+            if (!shift.lite && mShift.v > LITE_ON_MS) { shift.lite = true; framesSinceLite = 0; mShift.v = 0f }
+            else if (shift.lite && mShift.v in 0.01f..LITE_OFF_MS) { shift.lite = false; framesSinceLite = 0; mShift.v = 0f }
+        }
+        mShiftProf.add(shift.profMs); mShiftSearch.add(shift.searchMs)
+        tiles.gridLike = shift.gridLike
         var dx = 0f; var dy = 0f
         if (shift.confident) {
             if (!shift.static) { dx = shift.dx; dy = shift.dy }
@@ -359,7 +375,9 @@ class Pipeline(
         for (tr in toRemove) tracker.remove(tr)
 
         // 6. publish (censors follow the content at capture rate)
+        val tp = System.nanoTime()
         publish(tCap, buildScrollGuard(tCap, mode, interval))
+        mPublish.add((System.nanoTime() - tp) / 1e6f)
         val t4 = System.nanoTime()
 
         // 7. hand the frame to the detector
@@ -369,7 +387,8 @@ class Pipeline(
         // metrics
         if (interval > 0f) mInterval.add(interval)
         mDeliver.add(deliverMs); mCopy.add(copyMs)
-        mShift.add((t1 - t0) / 1e6f); mGuard.add((t3 - t2) / 1e6f)
+        mShift.add(shiftMs); mGuard.add((t3 - t2) / 1e6f)
+        capIntervalShared = mInterval.v
         mAnalyze.add((t4 - t0) / 1e6f); mPre.add((t5 - t4) / 1e6f)
         capFrames++
         if (csvLog) {
@@ -463,11 +482,13 @@ class Pipeline(
         tracker.update(
             r.count, r.x1, r.y1, r.x2, r.y2, r.score, r.cls, now, r.cut && !tile,
             clipped = if (tile) r.clipped else null, keepMs = if (tile) TILE_KEEP_MS else 0L,
+            measT = r.tCap,
         )
         if (!tile) {
             var big = false
             for (i in 0 until r.count) if ((r.x2[i] - r.x1[i]) * (r.y2[i] - r.y1[i]) > 0.02f * w * h && r.score[i] >= 0.3f) big = true
             tiles.bigContent = big
+            if (big) tiles.noteBig(now)
         }
         // record the uncovered ring of every track confirmed just now
         for (tr in tracker.tracks) {
@@ -494,7 +515,7 @@ class Pipeline(
         }
         publish(now, buildScrollGuard(now, probe.mode, mInterval.v))
 
-        mQueue.add(r.queueMs); mInfer.add(r.inferMs); mDecode.add(r.decodeMs); mPost.add(tPost)
+        mQueue.add(r.queueMs); mWait.add(r.waitMs); mInfer.add(r.inferMs); mDecode.add(r.decodeMs); mPost.add(tPost)
         mDetAge.add((nowMs() - r.tCap).toFloat())
         detFrames++
         if (csvLog) {
@@ -574,7 +595,9 @@ class Pipeline(
             val py = bh * PAD + MIN_PAD
             // pad ahead of the motion: object motion x detector latency (fast movement leaks
             // otherwise), page motion only a little (it is predicted precisely)
-            val padMs = mDetAge.v.coerceIn(30f, 120f)
+            // (v1.6.1: positions are already predicted over the detector latency, so the
+            // pad only covers velocity error: half the age, bounded)
+            val padMs = (0.5f * mDetAge.v).coerceIn(15f, 60f)
             // object-motion lead only for real motion (velocity noise must not breathe the box)
             val moving = !occluded && tr.speed() > LEAD_MIN_SPEED
             val rvx = if (moving) tr.vx else 0f; val rvy = if (moving) tr.vy else 0f
@@ -584,12 +607,17 @@ class Pipeline(
             y1 -= py + max(-leadY, 0f); y2 += py + max(leadY, 0f)
             // snap outward to a block grid anchored to the CONTENT (moves with the scroll):
             // blocks stay glued to what they cover, and the box only resizes in whole blocks
+            // (still tracks only: a moving box must move smoothly, not in whole-block steps)
             val bpx = blockPx.coerceAtLeast(2f)
-            val gox = (cumX % bpx).toFloat(); val goy = (cumY % bpx).toFloat()
-            x1 = Pixelator.floorTo(x1, gox, bpx); y1 = Pixelator.floorTo(y1, goy, bpx)
-            x2 = Pixelator.ceilTo(x2, gox, bpx); y2 = Pixelator.ceilTo(y2, goy, bpx)
-            val gix = kotlin.math.round((x1 - gox) / bpx).toInt() - kotlin.math.floor(cumX / bpx).toInt()
-            val giy = kotlin.math.round((y1 - goy) / bpx).toInt() - kotlin.math.floor(cumY / bpx).toInt()
+            val snap = !tr.moving
+            var gix = Int.MIN_VALUE; var giy = Int.MIN_VALUE
+            if (snap) {
+                val gox = (cumX % bpx).toFloat(); val goy = (cumY % bpx).toFloat()
+                x1 = Pixelator.floorTo(x1, gox, bpx); y1 = Pixelator.floorTo(y1, goy, bpx)
+                x2 = Pixelator.ceilTo(x2, gox, bpx); y2 = Pixelator.ceilTo(y2, goy, bpx)
+                gix = kotlin.math.round((x1 - gox) / bpx).toInt() - kotlin.math.floor(cumX / bpx).toInt()
+                giy = kotlin.math.round((y1 - goy) / bpx).toInt() - kotlin.math.floor(cumY / bpx).toInt()
+            }
             x1 = max(x1, 0f); y1 = max(y1, 0f); x2 = min(x2, w); y2 = min(y2, h)
             if (x2 - x1 < 1f || y2 - y1 < 1f) continue
 
@@ -607,7 +635,7 @@ class Pipeline(
                 Pixelator.sampleBlocks(frame, fw, fh, stride, x1, y1, x2, y2, cols, rows, c)
                 // same blocks over the same content as last frame: smooth colours (no shimmer)
                 val prev = p?.colors
-                if (p != null && prev != null && p.cols == cols && p.rows == rows && p.gx == gix && p.gy == giy &&
+                if (snap && p != null && prev != null && p.cols == cols && p.rows == rows && p.gx == gix && p.gy == giy &&
                     prev.size == c.size) Pixelator.blend(prev, c, c)
                 if (p == null) { p = Pix(cols, rows, c); pix[tr.id] = p } else { p.cols = cols; p.rows = rows; p.colors = c }
                 p.gx = gix; p.gy = giy
@@ -657,7 +685,24 @@ class Pipeline(
                     while (running) {
                         s = null
                         for (c in slots) if (c.state == READY && (s == null || c.frameId > s.frameId || c.cut)) s = c
-                        if (s != null) break
+                        if (s != null) {
+                            // Fresh-frame wait: if the newest frame is already old (> 1/3 of a
+                            // capture interval) and the next one is due soon, wait for it. On
+                            // average this lowers detection age by ~1/3 interval (see README).
+                            val iv = capIntervalShared
+                            val cand = s
+                            if (!cand.cut && waitedFor != cand.frameId) {
+                                val waitMs = FreshWait.timeoutMs((System.nanoTime() - cand.readyNs) / 1e6f, iv)
+                                if (waitMs > 0) {
+                                    waitedFor = cand.frameId
+                                    val tw = System.nanoTime()
+                                    lock.wait(waitMs)
+                                    lastWaitMs = (System.nanoTime() - tw) / 1e6f
+                                    continue
+                                }
+                            }
+                            break
+                        }
                         lock.wait()
                     }
                     s?.also { taken ->
@@ -668,6 +713,7 @@ class Pipeline(
                 } ?: break
                 tiles.commit(slot.region, slot.tCap, slot.cumX, slot.cumY)
                 val tStart = System.nanoTime()
+                val waitMs = lastWaitMs; lastWaitMs = 0f
                 val cfgNow = censor
                 val out = det.run(slot.pre.output)
                 val tInf = System.nanoTime()
@@ -696,6 +742,7 @@ class Pipeline(
                     }
                 }
                 r.queueMs = (tStart - slot.readyNs) / 1e6f
+                r.waitMs = waitMs
                 r.inferMs = (tInf - tStart) / 1e6f
                 r.decodeMs = (System.nanoTime() - tInf) / 1e6f
                 inferMsShared = r.inferMs
@@ -745,27 +792,28 @@ class Pipeline(
         val tps = tilePassCount * 1000f / max(dt, 1L); val fps = fullPassCount * 1000f / max(dt, 1L)
         tilePassCount = 0; fullPassCount = 0
         val gb = if (!gridBoostEnabled) "off" else String.format(
-            java.util.Locale.US, "%d tiles of %d px, hot %d, full %.1f/s tile %.1f/s, hot-tile cycle %.0f ms",
+            java.util.Locale.US, "%s, %d tiles of %d px, hot %d, full %.1f/s tile %.1f/s, hot-tile cycle %.0f ms",
+            if (!shift.gridLike) "idle (no grid)" else if (tiles.bigContent || lastCap < tiles.bigUntilMs) "idle (large subject)" else "grid",
             tiles.tiles.size, tiles.tiles.firstOrNull()?.side ?: 0, tiles.hotCount(), fps, tps, tiles.cycleMsEma,
         )
         val hud = String.format(
             java.util.Locale.US,
             "%s | model %s | %s\ncapture: %s | %.0f x %d\n" +
                 "cap %.1f fps (int %.1f) deliver %.1f copy %.2f\n" +
-                "shift %.2f guard %.2f analyze+publish %.2f pre %.2f\n" +
+                "shift %.2f (prof %.2f srch %.2f%s) guard %.2f appear %.2f publish %.2f analyze+publish %.2f pre %.2f\n" +
                 "censor: %s\n" +
                 "appear guard: %s\n" +
                 "grid boost: %s\n" +
-                "det %.1f fps: queue %.1f infer %.1f decode %.2f post %.2f\n" +
+                "det %.1f fps: queue %.1f (fresh-wait %.1f) infer %.1f decode %.2f post %.2f\n" +
                 "overlay: hop %.1f apply %.2f layout %.2f relayout %.0f/s draw %.0f/s\n" +
                 "probe draw→cap %s lead %.0f vsync %.1f\n" +
                 "e2e est: tracked %.0f | new obj: guard %.0f, detector %.0f ms\n" +
                 "scroll %+.1f,%+.1f px/f %s | tracks %d (occ %d) ring-drop %d",
             backendName, model.id, socInfo, mode, fw.toFloat(), fh,
             capFps, mInterval.v, mDeliver.v, mCopy.v,
-            mShift.v, mGuard.v, mAnalyze.v, mPre.v,
+            mShift.v, mShiftProf.v, mShiftSearch.v, if (shift.lite) " lite" else "", mGuard.v, mAppear.v, mPublish.v, mAnalyze.v, mPre.v,
             censor.label(), ag, gb,
-            detFps, mQueue.v, mInfer.v, mDecode.v, mPost.v,
+            detFps, mQueue.v, mWait.v, mInfer.v, mDecode.v, mPost.v,
             r.hopMsEma, r.applyMsEma, r.layoutMsEma, r.relayoutsPerSec, r.drawsPerSec,
             if (pl > 0) String.format(java.util.Locale.US, "%.0f ms", pl) else "n/a", r.leadMs, vsyncMs,
             trackPath, appearPath, detPath,
@@ -789,6 +837,9 @@ class Pipeline(
         const val SCROLL_QUIET_MS = 150L
         /** keep-alive of tracks confirmed by tile passes (tiles revisit slowly) */
         const val TILE_KEEP_MS = 1200L
+        /** shift estimator self-tuning thresholds (ms EMA) */
+        const val LITE_ON_MS = 2.0f
+        const val LITE_OFF_MS = 0.6f
         private const val FREE = 0
         private const val WRITING = 1
         private const val READY = 2
