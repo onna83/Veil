@@ -50,6 +50,15 @@ object Backends {
 
     private fun environment(): Environment = env ?: Environment.create().also { env = it }
 
+    private fun open(ctx: Context, size: ModelSize, opts: CompiledModel.Options): CompiledModel {
+        if (size.external) {
+            val f = size.filePath(ctx)
+            if (!f.isFile) error("${size.id} not imported yet (Settings → Detection model → Import)")
+            return CompiledModel.create(f.absolutePath, opts, environment())
+        }
+        return CompiledModel.create(ctx.assets, size.asset, opts, environment())
+    }
+
     private fun gpu(ctx: Context, size: ModelSize, backend: CompiledModel.GpuOptions.Backend): Detector {
         val opts = CompiledModel.Options(Accelerator.GPU)
         opts.gpuOptions = CompiledModel.GpuOptions(
@@ -57,16 +66,16 @@ object Backends {
             backend = backend,
             priority = CompiledModel.GpuOptions.Priority.HIGH,
             serializationDir = ctx.codeCacheDir.absolutePath,
-            modelCacheKey = "nudenet_${size.px}_${backend.name}_v11",
+            modelCacheKey = "nudenet_${size.id}_${backend.name}_v15",
             serializeProgramCache = true,
         )
-        val m = CompiledModel.create(ctx.assets, size.asset, opts, environment())
+        val m = open(ctx, size, opts)
         val name = when (backend) {
             CompiledModel.GpuOptions.Backend.OPENCL -> "GPU-CL"
             CompiledModel.GpuOptions.Backend.OPENGL -> "GPU-GL"
             else -> "GPU"
         }
-        val d = Cm(m, "$name LiteRT2 ${size.px}", size)
+        val d = Cm(m, "$name LiteRT2 ${size.id}", size)
         d.run(FloatArray(3 * size.px * size.px))
         return d
     }
@@ -75,8 +84,8 @@ object Backends {
         val n = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 4)
         val opts = CompiledModel.Options(Accelerator.CPU)
         opts.cpuOptions = CompiledModel.CpuOptions(numThreads = n)
-        val m = CompiledModel.create(ctx.assets, size.asset, opts, environment())
-        val d = Cm(m, "CPU-XNNPACK x$n LiteRT2 ${size.px}", size)
+        val m = open(ctx, size, opts)
+        val d = Cm(m, "CPU-XNNPACK x$n LiteRT2 ${size.id}", size)
         d.run(FloatArray(3 * size.px * size.px))
         return d
     }

@@ -54,8 +54,13 @@ object Backends {
         }
     }
 
-    private fun load(ctx: Context, asset: String): MappedByteBuffer {
-        val fd = ctx.assets.openFd(asset)
+    private fun load(ctx: Context, model: ModelSize): MappedByteBuffer {
+        if (model.external) {
+            val f = model.filePath(ctx)
+            if (!f.isFile) error("${model.id} not imported yet (Settings → Detection model → Import)")
+            FileInputStream(f).use { return it.channel.map(FileChannel.MapMode.READ_ONLY, 0, f.length()) }
+        }
+        val fd = ctx.assets.openFd(model.asset)
         FileInputStream(fd.fileDescriptor).use { return it.channel.map(FileChannel.MapMode.READ_ONLY, fd.startOffset, fd.declaredLength) }
     }
 
@@ -69,7 +74,7 @@ object Backends {
         val opts = GpuDelegateFactory.Options()
             .setPrecisionLossAllowed(true)
             .setInferencePreference(GpuDelegateFactory.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED)
-            .setSerializationParams(ctx.codeCacheDir.absolutePath, "nudenet_${model.px}_${force ?: "auto"}_v11")
+            .setSerializationParams(ctx.codeCacheDir.absolutePath, "nudenet_${model.id}_${force ?: "auto"}_v15")
         if (force != null) opts.setForceBackend(force)
         val delegate = GpuDelegate(opts)
         try {
@@ -79,7 +84,7 @@ object Backends {
                 GpuDelegateFactory.Options.GpuBackend.OPENGL -> "GPU-GL"
                 else -> "GPU"
             }
-            val d = Tfl(interp, delegate, "$name LiteRT1 ${model.px}", model)
+            val d = Tfl(interp, delegate, "$name LiteRT1 ${model.id}", model)
             d.run(FloatArray(3 * model.px * model.px))
             return d
         } catch (t: Throwable) {
@@ -91,7 +96,7 @@ object Backends {
     private fun cpu(model: ModelSize, buf: MappedByteBuffer): Detector {
         val n = cpuThreads()
         val interp = Interpreter(buf, Interpreter.Options().setNumThreads(n).setUseXNNPACK(true))
-        val d = Tfl(interp, null, "CPU-XNNPACK x$n ${model.px}", model)
+        val d = Tfl(interp, null, "CPU-XNNPACK x$n ${model.id}", model)
         d.run(FloatArray(3 * model.px * model.px))
         return d
     }
@@ -101,7 +106,7 @@ object Backends {
 
     /** Create exactly this backend (no fallback); throws if it cannot run here. */
     fun createExact(ctx: Context, id: String, model: ModelSize): Detector {
-        val buf = load(ctx, model.asset)
+        val buf = load(ctx, model)
         return when (id) {
             "gpu_cl" -> gpu(ctx, model, buf, GpuDelegateFactory.Options.GpuBackend.OPENCL)
             "gpu_gl" -> gpu(ctx, model, buf, GpuDelegateFactory.Options.GpuBackend.OPENGL)

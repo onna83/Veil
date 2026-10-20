@@ -62,6 +62,12 @@ class YoloDecoder(
         iouThreshold: Float,
         maxX: Float,
         maxY: Float,
+        /**
+         * Disabled classes that veto an anchor: if one of them scores at least
+         * [VETO_RATIO] x the best enabled class there, the anchor is that (disabled)
+         * thing, e.g. a face, not a low-scoring enabled class. null = off.
+         */
+        veto: BooleanArray? = null,
     ): Int {
         val n = numAnchors
         var k = 0
@@ -78,6 +84,11 @@ class YoloDecoder(
                 c++
             }
             if (best < threshold || bestC < 0) continue
+            if (veto != null) {
+                var vb = 0f
+                for (vc in 0 until numClasses) if (veto[vc]) { val s = out[(4 + vc) * n + i]; if (s > vb) vb = s }
+                if (vb >= VETO_RATIO * best) continue
+            }
             val slot: Int
             if (k < maxCandidates) {
                 slot = k++
@@ -130,6 +141,7 @@ class YoloDecoder(
     }
 
     companion object {
+        const val VETO_RATIO = 2f
         fun clamp(v: Float, lo: Float, hi: Float) = if (v < lo) lo else if (v > hi) hi else v
 
         fun iou(ax1: Float, ay1: Float, ax2: Float, ay2: Float, bx1: Float, by1: Float, bx2: Float, by2: Float): Float {

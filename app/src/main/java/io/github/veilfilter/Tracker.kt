@@ -38,6 +38,13 @@ class Tracker(
     /** fast tracks survive this long without a detection (blurred frames get missed) */
     var fastMissTimeoutMs: Long = 800,
     val maxTracks: Int = 16,
+    /** innovation below max(deadbandPx, deadbandFrac x size) counts as detector noise */
+    var deadbandPx: Float = 4f,
+    var deadbandFrac: Float = 0.06f,
+    /** edge smoothing (weight of the measurement) for normal / large motion */
+    var fastSmoothing: Float = 0.9f,
+    /** fraction of a size decrease applied per detection while still (grow is immediate) */
+    var stillShrink: Float = 0.3f,
 ) {
     /** per-class thresholds (null = use the scalar defaults above) */
     var startByClass: FloatArray? = null
@@ -246,14 +253,44 @@ class Tracker(
             tr.vy = tr.vy.coerceIn(-2f, 2f)
             tr.seenSpeed = tr.speed()
         }
-        val k = smoothing
-        val sx1 = px1 + (mx1 - px1) * k
-        val sy1 = py1 + (my1 - py1) * k
-        val sx2 = px2 + (mx2 - px2) * k
-        val sy2 = py2 + (my2 - py2) * k
-        // never smaller than the measurement
-        tr.x1 = min(sx1, mx1); tr.y1 = min(sy1, my1)
-        tr.x2 = max(sx2, mx2); tr.y2 = max(sy2, my2)
+        // --- adaptive smoothing (anti-jitter) ---
+        // "Still" = the measurement barely moved since the last update (detector noise
+        // on a still / slowly moving object, after scroll compensation). Then edges get
+        // hysteresis: an edge that must grow jumps out at once to the measurement plus
+        // a small margin (so the next noisy detections fall inside: no flicker), and
+        // shrinks only slowly. Real motion is followed almost directly (no lag). The
+        // box always contains the measurement (never under-covers).
+        val ocx = (tr.x1 + tr.x2) * 0.5f; val ocy = (tr.y1 + tr.y2) * 0.5f
+        val mcx = (mx1 + mx2) * 0.5f; val mcy = (my1 + my2) * 0.5f
+        val dead = max(deadbandPx, deadbandFrac * max(mx2 - mx1, my2 - my1))
+        val disp = max(kotlin.math.abs(mcx - ocx), kotlin.math.abs(mcy - ocy))
+        val still = tr.hits > 1 && disp < dead
+        if (still) {
+            // noise, not motion: let the velocity decay instead of chasing jitter
+            tr.vx *= 0.5f; tr.vy *= 0.5f
+            tr.seenSpeed = tr.speed()
+            val hm = 0.75f * dead
+            // edge stays put unless the measurement leaves it (grow now) or sits well
+            // inside it (> 2 margins: the object really got smaller -> shrink gradually)
+            fun lo(p: Float, m: Float) = when {
+                m - hm < p -> m - hm
+                m - hm - p > 2f * hm -> p + (m - hm - p) * stillShrink
+                else -> p
+            }
+            fun hi(p: Float, m: Float) = when {
+                m + hm > p -> m + hm
+                p - (m + hm) > 2f * hm -> p + (m + hm - p) * stillShrink
+                else -> p
+            }
+            tr.x1 = min(lo(px1, mx1), mx1); tr.y1 = min(lo(py1, my1), my1)
+            tr.x2 = max(hi(px2, mx2), mx2); tr.y2 = max(hi(py2, my2), my2)
+        } else {
+            val pcx = (px1 + px2) * 0.5f; val pcy = (py1 + py2) * 0.5f
+            val innov = max(kotlin.math.abs(mcx - pcx), kotlin.math.abs(mcy - pcy))
+            val k = if (innov > 2f * dead) fastSmoothing else smoothing
+            tr.x1 = min(px1 + (mx1 - px1) * k, mx1); tr.y1 = min(py1 + (my1 - py1) * k, my1)
+            tr.x2 = max(px2 + (mx2 - px2) * k, mx2); tr.y2 = max(py2 + (my2 - py2) * k, my2)
+        }
         tr.t = now
         tr.lastSeen = now
         tr.confirmedAt = now

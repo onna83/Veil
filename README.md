@@ -1,4 +1,4 @@
-# Veil (v1.4)
+# Veil (v1.5)
 
 Veil is a free, open-source, **fully on-device** nudity filter for Android 14+.
 It watches the screen with MediaProjection, runs the NudeNet v3 `320n` detector
@@ -13,6 +13,46 @@ translations.
 > **Status:** v1 ran on a Galaxy S23 FE (censoring works; visible lag while
 > scrolling). v1.1 targets that scroll lag. It compiles and its core logic is
 > unit-tested on the JVM, but **v1.1 has not run on a device yet.**
+
+## What's new in v1.5 (less jitter, face bug, pixel size, bigger models)
+
+**Face bug (pixelated male faces with Faces off), root cause.** It was the skin-colour *appearance guard*, not the
+detector or the class filter. The guard ignores classes: it covers skin that is new compared with the detector's last
+frame. In reels a face is skin that keeps moving, so its leading edge counted as new skin every few frames. A box
+appeared on the face, the next detector pass released it, and it re-appeared (9 re-triggers per second in the test).
+Fix: the comparison is now motion-tolerant. Skin counts as new only if the detector saw no skin within ±3 cells (~36 px).
+Genuinely new skin elsewhere still triggers in the same frame.
+Hardening:
+- The decoder drops an anchor when a disabled face or male-chest class scores ≥ 2× the best enabled class there, so a
+  face can never come out as a low-scoring enabled class.
+- "Exposed" never included MALE_BREAST_EXPOSED. It is now a separate **Male chest** switch, off by default.
+
+**Jitter.**
+- Tracker: while an object is still (measured displacement < max(4 px, 6 % of its size)) its velocity decays instead of
+  chasing noise. Edges get hysteresis: grow immediately to the detection plus a small margin, shrink only when the
+  detection is clearly inside. Real motion is followed almost directly, the box always contains the detection, and
+  first appearance is immediate.
+- Motion-lead padding only applies above 0.05 px/ms.
+- Censor boxes snap to a pixel grid anchored to the page content, so blocks move with what they cover and boxes resize
+  in whole blocks. Block colours are smoothed when the grid is unchanged (no shimmer).
+- Overlay windows get a transparent margin (8 px or 8 %), so small changes redraw instead of relayouting the window.
+- Simulation result: still-object box jitter 4.2 → 1.0 px (−77 %), no under-coverage.
+
+**Pixel size.** A slider from 4 to 40 dp, default 10 dp (v1.4 blocks were about 1/7 of the box, often 20–30 dp).
+Applies live.
+
+**Detection model** (Advanced, applies at next start; the HUD shows `model …`):
+
+| option | input | file | box CPU, 4 threads (measured) | S23 FE GPU (estimate) |
+|---|---|---|---|---|
+| 320n @ 320 (default) | 320 | bundled, 6.2 MB | 7.3 ms | measured 16–24 ms |
+| 320n @ 256 | 256 | bundled, 6.2 MB | – | ~0.7× of 320 |
+| 320n @ 640 | 640 | bundled, 6.3 MB | 23.4 ms | 40–70 ms (4× FLOPs, 8.1 GFLOPs) |
+| 640m @ 640 | 640 | import, 52.0 MB FP16 | 177 ms | 120–300 ms (78.7 GFLOPs) |
+
+640m does not fit a 25 MB attachment (48 MB zipped). It ships as `veil-model-640m.part{1,2,3}of3.zip` (~16 MB each).
+In the app, tap *Import 640m model…* and select all three parts. They are joined and SHA-256-verified, so a wrong file
+is never loaded. Grid-boost tiles are off with 640m (too slow), and capture is capped at 1280 px for 640-input models.
 
 ## What's new in v1.4 (choose what to censor)
 

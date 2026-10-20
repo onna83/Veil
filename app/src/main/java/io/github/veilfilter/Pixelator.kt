@@ -8,6 +8,25 @@ import kotlin.math.min
 /** Pixel helpers on an RGBA_8888 frame copy (no allocation). */
 object Pixelator {
 
+    const val MAX_BLOCKS = 64
+
+    /** blocks of ~[block] px along [len] px (>= 1, <= [MAX_BLOCKS]) */
+    fun blocksOf(len: Float, block: Float): Int =
+        min(max(kotlin.math.round(len / max(block, 1f)).toInt(), 1), MAX_BLOCKS)
+
+    /** snap down / up to a grid of [block] px whose lines sit at [origin] + k*block */
+    fun floorTo(v: Float, origin: Float, block: Float) = kotlin.math.floor((v - origin) / block) * block + origin
+    fun ceilTo(v: Float, origin: Float, block: Float) = kotlin.math.ceil((v - origin) / block) * block + origin
+
+    /** average two opaque colour arrays into [out] (temporal smoothing of blocks) */
+    fun blend(prev: IntArray, cur: IntArray, out: IntArray) {
+        for (i in out.indices) {
+            val a = prev[i]; val b = cur[i]
+            out[i] = (0xFF shl 24) or (((((a shr 16) and 0xFF) + ((b shr 16) and 0xFF)) shr 1) shl 16) or
+                (((((a shr 8) and 0xFF) + ((b shr 8) and 0xFF)) shr 1) shl 8) or (((a and 0xFF) + (b and 0xFF)) shr 1)
+        }
+    }
+
     /** Number of blocks along an axis of [len] capture px. */
     fun blocksFor(len: Float, longSide: Float): Int {
         val blockPx = max(longSide / 7f, 8f)

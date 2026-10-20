@@ -89,6 +89,13 @@
             android:text="@string/censor_belly" />
 
         <Switch
+            android:id="@+id/censor_male_chest"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="48dp"
+            android:text="@string/censor_male_chest" />
+
+        <Switch
             android:id="@+id/censor_faces"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -110,6 +117,17 @@
             android:layout_marginStart="32dp"
             android:minHeight="48dp"
             android:text="@string/censor_face_male" />
+
+        <TextView
+            android:id="@+id/pixel_label"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp" />
+
+        <SeekBar
+            android:id="@+id/pixel_size"
+            android:layout_width="match_parent"
+            android:layout_height="48dp" />
 
         <TextView
             android:layout_width="wrap_content"
@@ -189,12 +207,28 @@
             android:layout_width="match_parent"
             android:layout_height="48dp" />
 
-        <Switch
-            android:id="@+id/fast256"
-            android:layout_width="match_parent"
+        <TextView
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:minHeight="48dp"
-            android:text="@string/fast256" />
+            android:layout_marginTop="8dp"
+            android:text="@string/model_label" />
+
+        <Spinner
+            android:id="@+id/model"
+            android:layout_width="match_parent"
+            android:layout_height="48dp" />
+
+        <TextView
+            android:id="@+id/model_status"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:alpha="0.8" />
+
+        <Button
+            android:id="@+id/import_model"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/import_model" />
 
         <TextView
             android:layout_width="wrap_content"

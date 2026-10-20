@@ -58,6 +58,7 @@ class MainActivity : Activity() {
         bind(R.id.censor_exposed, AppSettings.KEY_C_EXPOSED, c.exposed)
         bind(R.id.censor_covered, AppSettings.KEY_C_COVERED, c.covered)
         bind(R.id.censor_belly, AppSettings.KEY_C_BELLY, c.belly)
+        bind(R.id.censor_male_chest, AppSettings.KEY_C_MALE_CHEST, c.maleChest)
         bind(R.id.censor_face_female, AppSettings.KEY_C_FACE_F, c.femaleFaces)
         bind(R.id.censor_face_male, AppSettings.KEY_C_FACE_M, c.maleFaces)
         faceF.isEnabled = c.faces; faceM.isEnabled = c.faces
@@ -72,9 +73,22 @@ class MainActivity : Activity() {
         val csv = findViewById<Switch>(R.id.csv_log)
         csv.isChecked = AppSettings.csvLog
         csv.setOnCheckedChangeListener { _, v -> AppSettings.setCsvLog(this, v) }
-        val fast = findViewById<Switch>(R.id.fast256)
-        fast.isChecked = AppSettings.fast256
-        fast.setOnCheckedChangeListener { _, v -> AppSettings.setFast256(this, v) }
+        setupModelPicker()
+
+        val pixLabel = findViewById<TextView>(R.id.pixel_label)
+        val pix = findViewById<SeekBar>(R.id.pixel_size)
+        pix.max = AppSettings.PIXEL_MAX_DP - AppSettings.PIXEL_MIN_DP
+        pix.progress = AppSettings.pixelDp - AppSettings.PIXEL_MIN_DP
+        pixLabel.text = getString(R.string.pixel_label, AppSettings.pixelDp)
+        pix.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, v: Int, fromUser: Boolean) {
+                val dp = v + AppSettings.PIXEL_MIN_DP
+                pixLabel.text = getString(R.string.pixel_label, dp)
+                if (fromUser) AppSettings.setPixelDp(this@MainActivity, dp)
+            }
+            override fun onStartTrackingTouch(sb: SeekBar) {}
+            override fun onStopTrackingTouch(sb: SeekBar) {}
+        })
 
         val leadLabel = findViewById<TextView>(R.id.lead_label)
         val lead = findViewById<SeekBar>(R.id.lead)
@@ -193,6 +207,7 @@ class MainActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_IMPORT) { if (resultCode == RESULT_OK && data != null) importModel(data); return }
         if (requestCode != REQ_CAPTURE) return
         if (resultCode == RESULT_OK && data != null) {
             CaptureService.start(this, resultCode, data)
@@ -201,6 +216,66 @@ class MainActivity : Activity() {
         } else {
             Toast.makeText(this, R.string.consent_denied, Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private lateinit var modelStatus: TextView
+
+    private fun setupModelPicker() {
+        modelStatus = findViewById(R.id.model_status)
+        val sp = findViewById<Spinner>(R.id.model)
+        val models = ModelSize.entries
+        sp.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, models.map { it.label })
+        sp.setSelection(models.indexOf(AppSettings.modelSize).coerceAtLeast(0))
+        sp.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                AppSettings.setModel(this@MainActivity, models[pos]); refreshModelStatus()
+            }
+            override fun onNothingSelected(p: AdapterView<*>?) {}
+        }
+        findViewById<Button>(R.id.import_model).setOnClickListener {
+            val i = Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+                .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            try { startActivityForResult(i, REQ_IMPORT) } catch (_: Exception) { modelStatus.text = getString(R.string.import_no_picker) }
+        }
+        refreshModelStatus()
+    }
+
+    private fun refreshModelStatus() {
+        val m = AppSettings.modelSize
+        val big = ModelSize.M640
+        val imported = big.available(this)
+        modelStatus.text = getString(
+            if (m.external && !imported) R.string.model_missing else R.string.model_status,
+            m.id, if (imported) getString(R.string.model_imported) else getString(R.string.model_not_imported),
+        )
+    }
+
+    private fun importModel(data: Intent) {
+        val uris = ArrayList<Uri>()
+        data.clipData?.let { c -> for (k in 0 until c.itemCount) uris.add(c.getItemAt(k).uri) }
+        if (uris.isEmpty()) data.data?.let { uris.add(it) }
+        val sources = uris.map { u -> ModelImporter.Source(displayName(u)) { contentResolver.openInputStream(u) ?: error("cannot open $u") } }
+        modelStatus.text = getString(R.string.importing)
+        val dst = ModelSize.M640.filePath(this)
+        Thread({
+            var last = 0L
+            val err = ModelImporter.import(sources, dst) { n ->
+                if (n - last > 4_000_000) { last = n; runOnUiThread { modelStatus.text = getString(R.string.importing_mb, n / 1_000_000) } }
+            }
+            runOnUiThread {
+                if (err == null) { Toast.makeText(this, R.string.import_ok, Toast.LENGTH_LONG).show(); refreshModelStatus() }
+                else modelStatus.text = err
+            }
+        }, "veil-import").start()
+    }
+
+    private fun displayName(u: Uri): String {
+        val c = contentResolver.query(u, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+        var name: String? = null
+        if (c != null) {
+            try { if (c.moveToFirst()) name = c.getString(0) } finally { c.close() }
+        }
+        return name ?: u.lastPathSegment ?: "file"
     }
 
     /**
@@ -217,7 +292,7 @@ class MainActivity : Activity() {
         val app = applicationContext
         Thread({
             val sb = StringBuilder()
-            sb.append("${Backends.RUNTIME}, ${model.px} px, ${android.os.Build.SOC_MANUFACTURER} ${android.os.Build.SOC_MODEL}\n")
+            sb.append("${Backends.RUNTIME}, ${model.id}, ${android.os.Build.SOC_MANUFACTURER} ${android.os.Build.SOC_MODEL}\n")
             var bestId = ""
             var bestMs = Double.MAX_VALUE
             for (o in Backends.options) {
@@ -257,6 +332,7 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQ_CAPTURE = 1
+        const val REQ_IMPORT = 42
         private const val REQ_NOTIF = 2
     }
 }

@@ -56,6 +56,7 @@ class ScrollTrackingSimTest {
         var maxErr = 0f
         var maxNaiveErr = 0.0
         var maxPredErr = 0f
+        var maxUnder = 0f
         for (n in 0 until 24) {
             val t = n * dt
             val off = v * t
@@ -83,6 +84,8 @@ class ScrollTrackingSimTest {
                 val k = tr.tracks[0]
                 val err = abs(k.y1 - (objTop + off).toFloat())
                 maxErr = max(maxErr, err)
+                // v1.5 edge hysteresis may over-cover by a few px while still; never under-cover
+                maxUnder = max(maxUnder, k.y1 - (objTop + off).toFloat())
                 // renderer-style forward prediction to t + 40 ms (velocity = residual + global)
                 val lead = 40f
                 val pred = k.y1 + (k.vy + gv) * lead
@@ -92,7 +95,9 @@ class ScrollTrackingSimTest {
         println("sim: naive=%.1f tracked=%.2f predicted=%.2f px".format(maxNaiveErr, maxErr, maxPredErr))
         // Without compensation the box trails by ~ v * 2 frames = 19 px; with it it sticks.
         assertTrue("naive error $maxNaiveErr", maxNaiveErr > 15)
-        assertTrue("tracked error $maxErr px", maxErr < 3f)
-        assertTrue("predicted error $maxPredErr px", maxPredErr < 4f)
+        // tracking error <3 px plus the anti-jitter hysteresis margin (0.75 x 4.8 px here)
+        assertTrue("tracked error $maxErr px", maxErr < 3f + 3.6f)
+        assertTrue("under-coverage $maxUnder px", maxUnder < 1f)
+        assertTrue("predicted error $maxPredErr px", maxPredErr < 4f + 3.6f)
     }
 }

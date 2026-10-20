@@ -34,7 +34,7 @@ object DetectorFactory {
         val ver = try {
             ctx.packageManager.getPackageInfo(ctx.packageName, 0).longVersionCode
         } catch (_: Throwable) { 0L }
-        return "${Backends.RUNTIME}|${model.px}|$ver|${Build.SOC_MODEL}"
+        return "${Backends.RUNTIME}|${model.id}|$ver|${Build.SOC_MODEL}"
     }
 
     fun remember(ctx: Context, model: ModelSize, id: String, ms: Double) {

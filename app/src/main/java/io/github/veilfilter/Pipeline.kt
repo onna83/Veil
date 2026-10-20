@@ -77,7 +77,7 @@ class Pipeline(
     private val excl = FloatArray(4 * 40)
     private var nExcl = 0
 
-    private class Pix(var cols: Int, var rows: Int, var colors: IntArray?)
+    private class Pix(var cols: Int, var rows: Int, var colors: IntArray?) { var gx = Int.MIN_VALUE; var gy = Int.MIN_VALUE }
     private val pix = HashMap<Int, Pix>()
     private val tmpIds = HashSet<Int>()
     private val toRemove = ArrayList<Tracker.Track>()
@@ -95,6 +95,8 @@ class Pipeline(
     @Volatile var vsyncMs = 16.7f
     /** user-tunable extra prediction (Advanced > Scroll prediction) */
     @Volatile var extraLeadMs = 0f
+    /** pixelation block size in capture px (from the Pixel size setting), read live */
+    @Volatile var blockPx = 16f
 
     // ---------------- inference hand-off ----------------
     private class Slot(size: Int) {
@@ -570,11 +572,21 @@ class Pipeline(
             // pad ahead of the motion: object motion x detector latency (fast movement leaks
             // otherwise), page motion only a little (it is predicted precisely)
             val padMs = mDetAge.v.coerceIn(30f, 120f)
-            val rvx = if (occluded) 0f else tr.vx; val rvy = if (occluded) 0f else tr.vy
+            // object-motion lead only for real motion (velocity noise must not breathe the box)
+            val moving = !occluded && tr.speed() > LEAD_MIN_SPEED
+            val rvx = if (moving) tr.vx else 0f; val rvy = if (moving) tr.vy else 0f
             val leadX = rvx * padMs + gvx * LEAD_PAD_GLOBAL_MS
             val leadY = rvy * padMs + gvy * LEAD_PAD_GLOBAL_MS
             x1 -= px + max(-leadX, 0f); x2 += px + max(leadX, 0f)
             y1 -= py + max(-leadY, 0f); y2 += py + max(leadY, 0f)
+            // snap outward to a block grid anchored to the CONTENT (moves with the scroll):
+            // blocks stay glued to what they cover, and the box only resizes in whole blocks
+            val bpx = blockPx.coerceAtLeast(2f)
+            val gox = (cumX % bpx).toFloat(); val goy = (cumY % bpx).toFloat()
+            x1 = Pixelator.floorTo(x1, gox, bpx); y1 = Pixelator.floorTo(y1, goy, bpx)
+            x2 = Pixelator.ceilTo(x2, gox, bpx); y2 = Pixelator.ceilTo(y2, goy, bpx)
+            val gix = kotlin.math.round((x1 - gox) / bpx).toInt() - kotlin.math.floor(cumX / bpx).toInt()
+            val giy = kotlin.math.round((y1 - goy) / bpx).toInt() - kotlin.math.floor(cumY / bpx).toInt()
             x1 = max(x1, 0f); y1 = max(y1, 0f); x2 = min(x2, w); y2 = min(y2, h)
             if (x2 - x1 < 1f || y2 - y1 < 1f) continue
 
@@ -586,12 +598,16 @@ class Pipeline(
                 if (p == null) { p = Pix(1, 1, null); pix[tr.id] = p }
                 colors = p.colors
             } else {
-                val long = max(x2 - x1, y2 - y1)
-                val cols = Pixelator.blocksFor(x2 - x1, long)
-                val rows = Pixelator.blocksFor(y2 - y1, long)
+                val cols = Pixelator.blocksOf(x2 - x1, bpx)
+                val rows = Pixelator.blocksOf(y2 - y1, bpx)
                 val c = IntArray(cols * rows) // published arrays are immutable
                 Pixelator.sampleBlocks(frame, fw, fh, stride, x1, y1, x2, y2, cols, rows, c)
+                // same blocks over the same content as last frame: smooth colours (no shimmer)
+                val prev = p?.colors
+                if (p != null && prev != null && p.cols == cols && p.rows == rows && p.gx == gix && p.gy == giy &&
+                    prev.size == c.size) Pixelator.blend(prev, c, c)
                 if (p == null) { p = Pix(cols, rows, c); pix[tr.id] = p } else { p.cols = cols; p.rows = rows; p.colors = c }
+                p.gx = gix; p.gy = giy
                 colors = c
             }
             out.add(CensorBox(tr.id, x1, y1, x2, y2, vx, vy, tCap, p.cols, p.rows, colors))
@@ -602,9 +618,8 @@ class Pipeline(
         for (b in appear.boxes) {
             val x1 = max(b.x1, 0f); val y1 = max(b.y1, 0f); val x2 = min(b.x2, w); val y2 = min(b.y2, h)
             if (x2 - x1 < 1f || y2 - y1 < 1f) continue
-            val long = max(x2 - x1, y2 - y1)
-            val cols = Pixelator.blocksFor(x2 - x1, long)
-            val rows = Pixelator.blocksFor(y2 - y1, long)
+            val cols = Pixelator.blocksOf(x2 - x1, blockPx)
+            val rows = Pixelator.blocksOf(y2 - y1, blockPx)
             val c = IntArray(cols * rows)
             Pixelator.sampleBlocks(frame, fw, fh, stride, x1, y1, x2, y2, cols, rows, c)
             out.add(CensorBox(APPEAR_ID_BASE - b.id, x1, y1, x2, y2, gvx, gvy, tCap, cols, rows, c))
@@ -648,6 +663,7 @@ class Pipeline(
                 val n = decoder.decode(
                     out, det.coordScale, slot.pre.scale, cfgNow.decodeThreshold, cfgNow.mask,
                     classAware = true, iouThreshold = 0.45f, maxX = slot.rw.toFloat(), maxY = slot.rh.toFloat(),
+                    veto = cfgNow.veto,
                 )
                 val r = DetResult(max(n, 1))
                 r.count = n
@@ -723,7 +739,7 @@ class Pipeline(
         )
         val hud = String.format(
             java.util.Locale.US,
-            "%s | %s\ncapture: %s | %.0f x %d\n" +
+            "%s | model %s | %s\ncapture: %s | %.0f x %d\n" +
                 "cap %.1f fps (int %.1f) deliver %.1f copy %.2f\n" +
                 "shift %.2f guard %.2f analyze+publish %.2f pre %.2f\n" +
                 "censor: %s\n" +
@@ -734,7 +750,7 @@ class Pipeline(
                 "probe draw→cap %s lead %.0f vsync %.1f\n" +
                 "e2e est: tracked %.0f | new obj: guard %.0f, detector %.0f ms\n" +
                 "scroll %+.1f,%+.1f px/f %s | tracks %d (occ %d) ring-drop %d",
-            backendName, socInfo, mode, fw.toFloat(), fh,
+            backendName, model.id, socInfo, mode, fw.toFloat(), fh,
             capFps, mInterval.v, mDeliver.v, mCopy.v,
             mShift.v, mGuard.v, mAnalyze.v, mPre.v,
             censor.label(), ag, gb,
@@ -756,6 +772,8 @@ class Pipeline(
         const val PAD = 0.10f
         const val MIN_PAD = 3f
         const val LEAD_PAD_GLOBAL_MS = 20f
+        /** residual speed (px/ms) below which no motion lead padding is added */
+        const val LEAD_MIN_SPEED = 0.05f
         /** quiet time after a scroll before pre-emptive guards may fire again */
         const val SCROLL_QUIET_MS = 150L
         /** keep-alive of tracks confirmed by tile passes (tiles revisit slowly) */

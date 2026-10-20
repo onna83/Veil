@@ -51,6 +51,8 @@ class CaptureService : Service() {
     private var contentW = 0
     private var contentH = 0
     private var capW = 0
+    /** on-screen width of the captured content (px), for dp -> capture px */
+    private var screenW = 1
     private var capH = 0
     @Volatile private var stopping = false
 
@@ -148,15 +150,16 @@ class CaptureService : Service() {
         p.csvLog = AppSettings.csvLog
         p.appearanceGuardEnabled = AppSettings.appearanceGuard
         p.scrollGuardEnabled = AppSettings.scrollGuard
-        p.gridBoostEnabled = AppSettings.gridBoost
+        p.gridBoostEnabled = AppSettings.gridBoost && AppSettings.modelSize.tiles
             p.censor = AppSettings.censor
+            p.blockPx = AppSettings.blockCapturePx(AppSettings.pixelDp, resources.displayMetrics.density, capW, screenW)
         p.vsyncMs = vsync
         p.extraLeadMs = AppSettings.extraLeadMs.toFloat()
         pipeline = p
         if (p.csvLog) {
             Log.i(Pipeline.CSV, Pipeline.CSV_HEADER_F)
             Log.i(Pipeline.CSV, Pipeline.CSV_HEADER_D)
-            Log.i(Pipeline.CSV, "I,soc=$soc,model=${model.px},backend=$backendId,runtime=${Backends.RUNTIME},refresh=${display.refreshRate}")
+            Log.i(Pipeline.CSV, "I,soc=$soc,model=${model.id},backend=$backendId,runtime=${Backends.RUNTIME},refresh=${display.refreshRate}")
         }
         p.start()
 
@@ -187,8 +190,9 @@ class CaptureService : Service() {
             p.csvLog = AppSettings.csvLog
             p.appearanceGuardEnabled = AppSettings.appearanceGuard
             p.scrollGuardEnabled = AppSettings.scrollGuard
-            p.gridBoostEnabled = AppSettings.gridBoost
+            p.gridBoostEnabled = AppSettings.gridBoost && AppSettings.modelSize.tiles
             p.censor = AppSettings.censor
+            p.blockPx = AppSettings.blockCapturePx(AppSettings.pixelDp, resources.displayMetrics.density, capW, screenW)
             p.extraLeadMs = AppSettings.extraLeadMs.toFloat()
             p.onImageAvailable(rd)
         }, worker)
@@ -211,7 +215,10 @@ class CaptureService : Service() {
         // long side, so ~3x that (960 for 320) loses nothing for detection while
         // cutting deliver/copy cost vs 540x1170 (~-30% pixels). Short side >= 360.
         // grid boost: 4x input (1280 for 320) so 2-across tiles get ~1:1 source pixels
-        val long = (if (AppSettings.gridBoost) CAPTURE_LONG_PER_INPUT_GRID else CAPTURE_LONG_PER_INPUT) * AppSettings.modelSize.px
+        // 640-input models: capped at 1280 (more pixels would only cost copy/analysis time)
+        val long = ModelSize.captureLong(
+            AppSettings.modelSize, if (AppSettings.gridBoost) CAPTURE_LONG_PER_INPUT_GRID else CAPTURE_LONG_PER_INPUT,
+        )
         var s = min(1f, long / max(cw, ch).toFloat())
         s = min(1f, max(s, MIN_SHORT_SIDE / min(cw, ch).toFloat()))
         capW = max(2, (cw * s / 2f).roundToInt() * 2)
@@ -230,6 +237,7 @@ class CaptureService : Service() {
             val h = (ch * scale).roundToInt()
             rect.set(db.centerX() - w / 2, db.centerY() - h / 2, db.centerX() - w / 2 + w, db.centerY() - h / 2 + h)
         }
+        screenW = rect.width()
         renderer?.let {
             it.contentRect.set(rect)
             it.frameW = capW

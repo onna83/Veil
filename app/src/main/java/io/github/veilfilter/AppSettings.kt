@@ -9,14 +9,21 @@ object AppSettings {
     private const val KEY_HUD = "debug_hud"
     private const val KEY_CSV = "csv_log"
     private const val KEY_BACKEND = "backend"
-    private const val KEY_FAST = "fast256"
+    private const val KEY_FAST = "fast256" // pre-1.5, migrated to KEY_MODEL
+    private const val KEY_MODEL = "model"
     private const val KEY_LEAD = "extra_lead_ms"
     private const val KEY_APPEAR = "appearance_guard"
     private const val KEY_SCROLL = "scroll_guard"
     private const val KEY_GRID = "grid_boost"
+    private const val KEY_PIXEL = "pixel_dp"
+    const val PIXEL_MIN_DP = 4
+    const val PIXEL_MAX_DP = 40
+    /** v1.4 blocks were ~1/7 of the box (often 20-30 dp); finer default so you can judge what is covered */
+    const val PIXEL_DEFAULT_DP = 10
     const val KEY_C_EXPOSED = "censor_exposed"
     const val KEY_C_COVERED = "censor_covered"
     const val KEY_C_BELLY = "censor_belly"
+    const val KEY_C_MALE_CHEST = "censor_male_chest"
     const val KEY_C_FACES = "censor_faces"
     const val KEY_C_FACE_F = "censor_face_female"
     const val KEY_C_FACE_M = "censor_face_male"
@@ -26,6 +33,7 @@ object AppSettings {
         exposed = get(KEY_C_EXPOSED, true),
         covered = get(KEY_C_COVERED, false),
         belly = get(KEY_C_BELLY, false),
+        maleChest = get(KEY_C_MALE_CHEST, false),
         faces = get(KEY_C_FACES, false),
         femaleFaces = get(KEY_C_FACE_F, true),
         maleFaces = get(KEY_C_FACE_M, true),
@@ -45,12 +53,14 @@ object AppSettings {
     @Volatile var gridBoost = true; private set
     @Volatile var csvLog = false; private set
     @Volatile var backend = "auto"; private set
-    @Volatile var fast256 = false; private set
+    @Volatile var model = ModelSize.S320; private set
     /** extra scroll prediction, ms (0..60), read live */
     @Volatile var extraLeadMs = 0; private set
+    /** pixelation block size, dp on screen, read live */
+    @Volatile var pixelDp = PIXEL_DEFAULT_DP; private set
     private var loaded = false
 
-    val modelSize: ModelSize get() = if (fast256) ModelSize.S256 else ModelSize.S320
+    val modelSize: ModelSize get() = model
 
     fun load(ctx: Context) {
         if (loaded) return
@@ -63,9 +73,11 @@ object AppSettings {
         csvLog = p.getBoolean(KEY_CSV, false)
         backend = p.getString(KEY_BACKEND, "auto") ?: "auto"
         if (Backends.options.none { it.id == backend }) backend = "auto"
-        fast256 = p.getBoolean(KEY_FAST, false)
+        model = ModelSize.byId(p.getString(KEY_MODEL, null))
+            ?: if (p.getBoolean(KEY_FAST, false)) ModelSize.S256 else ModelSize.S320
         extraLeadMs = p.getInt(KEY_LEAD, 0).coerceIn(0, MAX_LEAD)
         censor = censorFrom { k, d -> p.getBoolean(k, d) }
+        pixelDp = p.getInt(KEY_PIXEL, PIXEL_DEFAULT_DP).coerceIn(PIXEL_MIN_DP, PIXEL_MAX_DP)
         loaded = true
     }
 
@@ -80,7 +92,11 @@ object AppSettings {
     fun setBackend(ctx: Context, v: String) { backend = v; prefs(ctx).edit().putString(KEY_BACKEND, v).apply() }
     const val MAX_LEAD = 60
     fun setExtraLead(ctx: Context, v: Int) { extraLeadMs = v; prefs(ctx).edit().putInt(KEY_LEAD, v).apply() }
-    fun setFast256(ctx: Context, v: Boolean) { fast256 = v; prefs(ctx).edit().putBoolean(KEY_FAST, v).apply() }
+    fun setPixelDp(ctx: Context, v: Int) { pixelDp = v.coerceIn(PIXEL_MIN_DP, PIXEL_MAX_DP); prefs(ctx).edit().putInt(KEY_PIXEL, pixelDp).apply() }
+    /** dp on screen -> capture px */
+    fun blockCapturePx(dp: Int, density: Float, captureW: Int, screenW: Int): Float =
+        dp * density * captureW / kotlin.math.max(1, screenW).toFloat()
+    fun setModel(ctx: Context, v: ModelSize) { model = v; prefs(ctx).edit().putString(KEY_MODEL, v.id).apply() }
 }
 
 /** Running flag + listener so the activity can refresh its button. */

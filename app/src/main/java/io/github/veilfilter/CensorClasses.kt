@@ -16,6 +16,8 @@ class CensorConfig(
     val exposed: Boolean = true,
     val covered: Boolean = false,
     val belly: Boolean = false,
+    /** MALE_BREAST_EXPOSED: never part of "exposed"; separate, default off */
+    val maleChest: Boolean = false,
     val faces: Boolean = false,
     val femaleFaces: Boolean = true,
     val maleFaces: Boolean = true,
@@ -35,8 +37,14 @@ class CensorConfig(
         if (exposed) on(EXPOSED, 0.30f, 0.20f)
         if (covered) on(COVERED, 0.40f, 0.25f)
         if (belly) on(BELLY, 0.40f, 0.25f)
+        if (maleChest) on(MALE_CHEST, 0.40f, 0.25f)
         if (faces && femaleFaces) on(listOf("FACE_FEMALE"), 0.35f, 0.20f)
         if (faces && maleFaces) on(listOf("FACE_MALE"), 0.35f, 0.20f)
+    }
+
+    /** disabled face / male-chest classes veto anchors they dominate (see YoloDecoder) */
+    val veto = BooleanArray(Labels.NUM_CLASSES).also { v ->
+        for (n in VETO_CANDIDATES) { val i = Labels.index(n); v[i] = !mask[i] }
     }
 
     val any: Boolean get() = mask.any { it }
@@ -51,6 +59,7 @@ class CensorConfig(
         if (exposed) p += "exposed"
         if (covered) p += "covered"
         if (belly) p += "belly"
+        if (maleChest) p += "male chest"
         if (faces && (femaleFaces || maleFaces)) {
             p += "faces(" + listOfNotNull("F".takeIf { femaleFaces }, "M".takeIf { maleFaces }).joinToString(",") + ")"
         }
@@ -65,5 +74,7 @@ class CensorConfig(
             "BUTTOCKS_EXPOSED", "ANUS_EXPOSED")
         val COVERED = listOf("FEMALE_BREAST_COVERED", "FEMALE_GENITALIA_COVERED", "BUTTOCKS_COVERED", "ANUS_COVERED")
         val BELLY = listOf("BELLY_EXPOSED")
+        val MALE_CHEST = listOf("MALE_BREAST_EXPOSED")
+        val VETO_CANDIDATES = listOf("FACE_FEMALE", "FACE_MALE", "MALE_BREAST_EXPOSED")
     }
 }

@@ -182,17 +182,20 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
             val h = max(bt - t, 1)
             val lp = slot.lp
             val v = slot.view
-            // Does the box still fit the current window (and roughly its size)?
+            // margin ahead of the motion (screen px for ~MARGIN_MS of travel)
+            val mx = min(abs(vx * sx) * MARGIN_MS, maxMargin).toInt()
+            val my = min(abs(vy * sy) * MARGIN_MS, maxMargin).toInt()
+            // static margin on every side: small size/position changes are redrawn inside
+            // the (transparent) window instead of resizing it (relayouts look jumpy)
+            val sm = max(STATIC_MARGIN_MIN, (STATIC_MARGIN_FRAC * max(w, h)).toInt())
+            // Does the box still fit the current window, without the window being far too big?
             val fits = !slot.parked && l >= lp.x && t >= lp.y && l + w <= lp.x + lp.width && t + h <= lp.y + lp.height &&
-                abs(v.boxW - w) <= SIZE_SLACK && abs(v.boxH - h) <= SIZE_SLACK
+                lp.width - w <= 4 * sm + mx + SIZE_SLACK && lp.height - h <= 4 * sm + my + SIZE_SLACK
             if (!fits) {
-                // margin ahead of the motion (screen px for ~MARGIN_MS of travel)
-                val mx = min(abs(vx * sx) * MARGIN_MS, maxMargin).toInt()
-                val my = min(abs(vy * sy) * MARGIN_MS, maxMargin).toInt()
-                val wl = if (vx < 0) l - mx else l
-                val wt = if (vy < 0) t - my else t
-                val ww = w + mx
-                val wh = h + my
+                val wl = (if (vx < 0) l - mx else l) - sm
+                val wt = (if (vy < 0) t - my else t) - sm
+                val ww = w + mx + 2 * sm
+                val wh = h + my + 2 * sm
                 lp.x = wl; lp.y = wt; lp.width = ww; lp.height = wh
                 val t1 = System.nanoTime()
                 try { wm.updateViewLayout(v, lp) } catch (e: Exception) { Log.w(TAG, "update", e) }
@@ -450,6 +453,9 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
         const val MARGIN_MS = 120f
         /** box size change (screen px) tolerated without a relayout */
         const val SIZE_SLACK = 3
+        /** transparent margin around each box window (px / fraction of the box) */
+        const val STATIC_MARGIN_MIN = 8
+        const val STATIC_MARGIN_FRAC = 0.08f
         const val PARK_X = -20000
         const val PARK_Y = -20000
         val DARK = Color.rgb(24, 24, 28)

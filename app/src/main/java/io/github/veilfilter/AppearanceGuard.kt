@@ -29,6 +29,13 @@ class AppearanceGuard(
     var minCells: Int = 4,
     var minOnMs: Long = 80,
     var maxBoxes: Int = 4,
+    /**
+     * Motion tolerance (cells): skin counts as "new" only if the detector saw no
+     * skin within this radius. Without it, the leading edge of a moving face or
+     * arm (already checked, nothing to censor) re-triggered the guard every few
+     * frames in reels; that is what pixelated faces with Faces disabled (v1.4).
+     */
+    var motionCells: Int = 3,
 ) {
     var cols = 0; private set
     var rows = 0; private set
@@ -37,6 +44,9 @@ class AppearanceGuard(
     /** skin fraction per cell of the current frame, -1 = masked */
     var skin = FloatArray(0); private set
     private var ref = FloatArray(0)
+    /** [ref] max-filtered over +-[motionCells] (masked = 1) */
+    private var refDil = FloatArray(0)
+    private var tmpDil = FloatArray(0)
     private var refValid = false
     private var refCumX = 0.0
     private var refCumY = 0.0
@@ -63,7 +73,7 @@ class AppearanceGuard(
         w = fw; h = fh
         cols = max(1, fw / cell); rows = max(1, fh / cell)
         val n = cols * rows
-        skin = FloatArray(n); ref = FloatArray(n)
+        skin = FloatArray(n); ref = FloatArray(n); refDil = FloatArray(n); tmpDil = FloatArray(n)
         newCell = BooleanArray(n); label = IntArray(n); stack = IntArray(n)
         refValid = false
         boxes.clear()
@@ -106,6 +116,7 @@ class AppearanceGuard(
                 ref[j * cols + i] = grid[gj * cols + gi]
             }
         }
+        dilate()
         // release a box once the detector has seen its content: either the
         // detected frame is at least as new as the box's last trigger, or the
         // current frame has nothing "new" left inside the box vs the new reference
@@ -113,6 +124,27 @@ class AppearanceGuard(
         boxes.removeAll { b ->
             val inside = whole || (b.x1 - sx >= rx1 && b.x2 - sx <= rx2 && b.y1 - sy >= ry1 && b.y2 - sy <= ry2)
             nowMs - b.shownAt >= minOnMs && ((inside && b.lastTriggerFrame <= frameId) || newCellsIn(b) < minCells)
+        }
+    }
+
+    private fun dilate() {
+        val r = motionCells
+        // rows then columns (separable max filter); masked (-1) counts as checked skin
+        for (j in 0 until rows) {
+            val o = j * cols
+            for (i in 0 until cols) {
+                var m = 0f
+                for (d in max(0, i - r)..min(cols - 1, i + r)) {
+                    val v = ref[o + d]; val vv = if (v < 0f) 1f else v
+                    if (vv > m) m = vv
+                }
+                tmpDil[o + i] = m
+            }
+        }
+        for (i in 0 until cols) for (j in 0 until rows) {
+            var m = 0f
+            for (d in max(0, j - r)..min(rows - 1, j + r)) { val v = tmpDil[d * cols + i]; if (v > m) m = v }
+            refDil[j * cols + i] = m
         }
     }
 
@@ -218,8 +250,7 @@ class AppearanceGuard(
         val ax = fi - i0; val ay = fj - j0
         fun g(i: Int, j: Int): Float {
             if (i < 0 || j < 0 || i >= cols || j >= rows) return 0f
-            val v = ref[j * cols + i]
-            return if (v < 0f) 1f else v // masked in ref (under our censor): assume it was covered
+            return refDil[j * cols + i] // masked cells already count as 1
         }
         return g(i0, j0) * (1 - ax) * (1 - ay) + g(i0 + 1, j0) * ax * (1 - ay) +
             g(i0, j0 + 1) * (1 - ax) * ay + g(i0 + 1, j0 + 1) * ax * ay
