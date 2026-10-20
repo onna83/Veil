@@ -1,95 +1,168 @@
 #!/usr/bin/env python3
 """Veil launcher icon generator (original artwork, AGPL-3.0-or-later).
 
-One set of path definitions -> Android VectorDrawable XML (adaptive icon layers)
-and PNG previews rasterised with a tiny bezier flattener (PIL, 4x supersampling).
-Paths use absolute M/L/C/Z only. Canvas is the 108x108 adaptive-icon viewport;
-keep artwork inside the ~66-unit safe circle around (54,54).
+Neon-pink-on-black "censor bar" look. One set of shape definitions ->
+Android VectorDrawable XML (adaptive background / foreground / monochrome)
+and PNG previews rasterised here (PIL, 4x supersampling, alpha compositing).
+Glow = stacked translucent wide strokes (VectorDrawable has no blur), sized so
+it still reads at 48 px. Coordinates: 108x108 adaptive viewport, launchers
+show roughly the middle 72 units; keep art inside ~(24..84).
 
-usage: make_icon.py <res_dir> <out_dir>
+usage: make_icon.py <res_dir> <out_dir> [default_concept]
 """
-import sys, os
+import math, os, sys
 import numpy as np
 from PIL import Image, ImageDraw
 
-BG = "#2B1E3F"  # deep plum
+NEON = "#FF1FA8"; NEON_HOT = "#FF6BC8"; NEON_DEEP = "#B0107A"; INK = "#0B0610"; BG = "#0D0711"
 
-def blocks(x0, y0, cell, pattern, palette):
-    """pixelation blocks: pattern rows of chars, '.' = none, digits index palette"""
-    out = []
-    for r, row in enumerate(pattern):
-        for c, ch in enumerate(row):
-            if ch == '.':
-                continue
-            x, y = x0 + c * cell, y0 + r * cell
-            out.append((palette[int(ch)], f"M{x},{y} L{x+cell},{y} L{x+cell},{y+cell} L{x},{y+cell} Z"))
-    return out
+# ---------- layer helpers: dict(d, fill|stroke, alpha, width, evenOdd) ----------
+def F(d, c, a=1.0, eo=False): return dict(d=d, fill=c, alpha=a, eo=eo)
+def S(d, c, w, a=1.0): return dict(d=d, stroke=c, width=w, alpha=a)
+def glow(d, core=2.6, c=NEON):
+    """neon tube: soft halo + core + hot centre line"""
+    return [S(d, c, core + 8, 0.12), S(d, c, core + 4, 0.28), S(d, c, core), S(d, NEON_HOT, core * 0.35, 0.9)]
 
-# ---------------- concept A: pixel-censored peach (default) ----------------
-PEACH_BODY = ("M54,42 C60,35.5 77.5,37.5 77.5,57 C77.5,71.5 67,80.5 56.5,79.5 "
-              "L54,77.2 L51.5,79.5 C41,80.5 30.5,71.5 30.5,57 C30.5,37.5 48,35.5 54,42 Z")
-PEACH_SHADE = ("M54,42 C60,35.5 77.5,37.5 77.5,57 C77.5,71.5 67,80.5 56.5,79.5 "
-               "L54,77.2 C60,70 61,52 54,42 Z")
-PEACH_CREASE = "M53.2,44 C57.6,52 57.8,66 53.4,76.4 L55,76.4 C59.4,66 59.2,52 54.6,44 Z"
-PEACH_HI = "M38.5,47 C41,42.5 46,42 47.5,44.5 C46,47.5 41.5,51.5 38.8,52.5 C37.6,51 37.6,49 38.5,47 Z"
-LEAF_L = "M54,42 C50.5,33 41,30.2 35.5,33 C39,38.6 46.5,42.2 54,42 Z"
-LEAF_R = "M54.2,41.5 C57,31.5 66,27.8 72.5,30.6 C69,37.2 61.5,41.5 54.2,41.5 Z"
-LEAF_VEIN = "M53.6,41.8 C49,37.6 43,34.4 38,33.6 L38.2,33.1 C43.4,33.8 49.6,36.8 54.2,41.2 Z"
-PEACH_PALETTE = ["#FF7E5F", "#FFAE8C", "#E2604C", "#FF9773", "#C9503F"]
-PEACH_BLOCKS = blocks(45, 62, 4, [
-    ".302.",
-    "10231",
-    "32140",
-    "40313",
-    "..2..",
-], PEACH_PALETTE)
-PEACH_CREASE_MONO = "M53.2,44 C56.4,49.8 57.4,55.8 57.2,62 L58.8,62 C58.9,55.8 58,49.8 54.6,44 Z"
+def poly(pts, close=True):
+    s = "M" + " L".join(f"{x:.2f},{y:.2f}" for x, y in pts)
+    return s + (" Z" if close else "")
 
-def peach_fg():
-    return [("#FF8E6B", PEACH_BODY), ("#F27459", PEACH_SHADE), ("#D35B47", PEACH_CREASE),
-            ("#FFC7AE", PEACH_HI), ("#58B872", LEAF_L), ("#3F9A5B", LEAF_R), ("#3F9A5B", LEAF_VEIN)] + PEACH_BLOCKS
+def rect(x1, y1, x2, y2): return poly([(x1, y1), (x2, y1), (x2, y2), (x1, y2)])
 
-def peach_mono():
-    # alpha-only layer: body/leaves solid; crease + checker of pixel blocks punched out (evenOdd)
-    holes = [p for i, (_, p) in enumerate(PEACH_BLOCKS) if i % 2 == 0]
-    return [("#FFFFFF", " ".join([PEACH_BODY, PEACH_CREASE_MONO] + holes), "evenOdd"),
-            ("#FFFFFF", LEAF_L), ("#FFFFFF", LEAF_R)]
+def rot_rect(cx, cy, w, h, deg):
+    a = math.radians(deg); c, s = math.cos(a), math.sin(a)
+    return poly([(cx + x * c - y * s, cy + x * s + y * c) for x, y in
+                 ((-w/2, -h/2), (w/2, -h/2), (w/2, h/2), (-w/2, h/2))])
 
-# ---------------- concept B: curvy silhouette behind pixels (alt) ----------------
 def circle(cx, cy, r):
     k = 0.5523 * r
     return (f"M{cx},{cy-r} C{cx+k},{cy-r} {cx+r},{cy-k} {cx+r},{cy} C{cx+r},{cy+k} {cx+k},{cy+r} {cx},{cy+r} "
             f"C{cx-k},{cy+r} {cx-r},{cy+k} {cx-r},{cy} C{cx-r},{cy-k} {cx-k},{cy-r} {cx},{cy-r} Z")
 
-# reclining figure seen side-on: head, shoulder, waist dip, hip curve, legs
-CURVE_HEAD = circle(28.5, 52.5, 5.6)
-CURVE = ("M24,72 C24,64 28,60.5 33.5,60 C39,59.5 43.5,61.5 47.5,61.8 C53,62.2 56,48.5 65.5,48 "
-         "C73.5,47.6 77.5,55 81,58.6 C84,61.6 87,63.4 87,67.6 C87,70.6 85.6,72 83.5,72 Z")
-CURVE_SHADE = ("M47.5,61.8 C53,62.2 56,48.5 65.5,48 C73.5,47.6 77.5,55 81,58.6 C84,61.6 87,63.4 87,67.6 "
-               "C87,70.6 85.6,72 83.5,72 L50,72 C58,70 66,62 47.5,61.8 Z")
-CURVE_BASE = "M20,73.2 L88,73.2 L88,75 L20,75 Z"
-ALT_PALETTE = ["#E9A07E", "#F7C1A3", "#C97B5E", "#DE8F6E", "#B26A51"]
-ALT_BLOCKS = blocks(56, 46, 4, [
-    ".0132",
-    "21304",
-    "30214",
-    ".142.",
-], ALT_PALETTE)
+def censor_bar(cx, cy, w, h, deg):
+    """thick pink-outlined black bar with glow + a few dim pixel 'scanline' blocks inside"""
+    d = rot_rect(cx, cy, w, h, deg)
+    out = [S(d, NEON, 11, 0.12), S(d, NEON, 7, 0.25), F(d, INK), S(d, NEON, 2.8), S(d, NEON_HOT, 0.9, 0.9)]
+    a = math.radians(deg); c, s = math.cos(a), math.sin(a)
+    for i, (u, v, sz) in enumerate(((-0.3, -0.1, 3), (0.05, 0.12, 3), (0.32, -0.05, 3))):
+        x, y = u * w, v * h
+        out.append(F(rot_rect(cx + x * c - y * s, cy + x * s + y * c, sz, sz, deg), NEON, 0.22))
+    return out, d
 
-import re
-def _fit(d, sx=0.82, sy=0.82, dy=-1.0):
-    """scale about the centre into the safe zone"""
-    f = lambda m: f"{round(54 + (float(m[1]) - 54) * sx, 2)},{round(54 + (float(m[2]) - 54) * sy + dy, 2)}"
-    return re.sub(r"(-?[0-9.]+),(-?[0-9.]+)", f, d)
+# ---------- background (shared): near-black + dim pixel blocks ----------
+def background():
+    L = [F(rect(0, 0, 108, 108), BG)]
+    rnd = np.random.default_rng(7)
+    cell = 6
+    for gy in range(0, 108, cell):
+        for gx in range(0, 108, cell):
+            cx, cy = gx + cell / 2 - 54, gy + cell / 2 - 54
+            r = math.hypot(cx, cy)
+            p = min(1.0, max(0.0, (r - 22) / 30))  # denser toward the edges, empty centre
+            if rnd.random() < p * 0.55:
+                a = float(rnd.choice([0.10, 0.16, 0.24, 0.34]))
+                L.append(F(rect(gx, gy, gx + cell, gy + cell), NEON, a))
+    # faint sparkles
+    for x, y in ((30, 28), (80, 34), (26, 78), (84, 80)):
+        L.append(F(rect(x - 0.6, y - 0.6, x + 0.6, y + 0.6), NEON_HOT, 0.8))
+    return L
 
-def alt_fg():
-    return [(c, _fit(d)) for c, d in [("#E59A78", CURVE_HEAD), ("#E59A78", CURVE), ("#8E7BB5", CURVE_BASE)] + ALT_BLOCKS]
+# ---------- concept 1: glossy lips + censor bar ----------
+UP = ("M28,55 C34,47.5 42,42.5 48.5,45 C51,46 52.6,47.4 54,47.4 C55.4,47.4 57,46 59.5,45 "
+      "C66,42.5 74,47.5 80,55 C72,55.8 63,55.6 54,56 C45,55.6 36,55.8 28,55 Z")
+LO = ("M28,55 C37,57.2 45.5,57.4 54,57.4 C62.5,57.4 71,57.2 80,55 C75,65.5 65,70.5 54,70.5 "
+      "C43,70.5 33,65.5 28,55 Z")
+LIPS = UP + " " + LO
+GLOSS = "M45,64.5 C49,63.4 56,63.6 60,64.8 C56.5,67 48.5,67 45,64.5 Z"
+GLOSS_UP = "M36,51.5 C39,48.6 43,46.6 46.5,47.2 C44,49.4 40,51.4 36,51.5 Z"
+def lips():
+    bar, bard = censor_bar(55, 57.5, 58, 7.5, -9)
+    return ([S(LIPS, NEON, 10, 0.14), S(LIPS, NEON, 5, 0.3), F(UP, NEON), F(LO, "#E0108F"),
+             F(GLOSS, "#FFD0EC", 0.9), F(GLOSS_UP, "#FFD0EC", 0.75), S(LIPS, NEON_HOT, 1.0, 0.8)] + bar,
+            [F(LIPS + " " + bard, "#FFF", eo=True)])
 
-def alt_mono():
-    holes = [p for i, (_, p) in enumerate(ALT_BLOCKS) if (i % 2 == 0)]
-    return [("#FFFFFF", _fit(CURVE_HEAD)), ("#FFFFFF", _fit(" ".join([CURVE] + holes)), "evenOdd"), ("#FFFFFF", _fit(CURVE_BASE))]
+# ---------- concept 2: hourglass curve + glowing bar ----------
+HOUR = ("M45,26 C49,24.6 59,24.6 63,26 C67.5,27.6 68,31 66.5,35 C64,41 59.5,45 59.5,51 "
+        "C59.5,57 74,60.5 74,70 C74,77 68.5,81 65,86 L56.5,86 L54,80.5 L51.5,86 L43,86 "
+        "C39.5,81 34,77 34,70 C34,60.5 48.5,57 48.5,51 C48.5,45 44,41 41.5,35 C40,31 40.5,27.6 45,26 Z")
+HOUR_SHADE = ("M54,25 C57,25 61,25.2 63,26 C67.5,27.6 68,31 66.5,35 C64,41 59.5,45 59.5,51 "
+              "C59.5,57 74,60.5 74,70 C74,77 68.5,81 65,86 L56.5,86 L54,80.5 Z")
+def hourglass():
+    bar, bard = censor_bar(54, 69, 52, 9, -6)
+    return ([F(HOUR, "#9A0D6A"), F(HOUR_SHADE, "#6E094C")] + glow(HOUR, 2.4) + bar,
+            [F(HOUR + " " + bard, "#FFF", eo=True)])
 
-# ---------------- VectorDrawable writer ----------------
+# ---------- concept 3: keyhole with pixel skin/pink blocks ----------
+def keyhole_path():
+    cx, cy, r = 54, 45, 14
+    xl, xr = 48, 60
+    a0 = math.acos((xl - cx) / r)  # point on circle at x = xl (lower half)
+    pts = []
+    for k in range(41):  # from lower-left, over the top, to lower-right
+        t = math.pi - (math.pi - a0) + 0  # placeholder, replaced below
+    start = math.atan2(math.sqrt(r*r - (xl-cx)**2), xl - cx)   # angle (y down) at left join
+    end = math.atan2(math.sqrt(r*r - (xr-cx)**2), xr - cx)
+    # walk the long way round: start -> (through top) -> end, angles in y-down space
+    span = (2 * math.pi - (start - end))
+    for k in range(49):
+        t = start + span * k / 48
+        pts.append((cx + r * math.cos(t), cy + r * math.sin(t)))
+    pts += [(65, 83), (43, 83)]
+    return poly(pts), pts
+def inside(pts, x, y):
+    n = len(pts); c = False; j = n - 1
+    for i in range(n):
+        xi, yi = pts[i]; xj, yj = pts[j]
+        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi: c = not c
+        j = i
+    return c
+def keyhole():
+    d, pts = keyhole_path()
+    pal = ["#FF1FA8", "#FF5FBF", "#E8A07F", "#F6C2A4", "#C9785E", "#B0107A", "#FF8FD2"]
+    rnd = np.random.default_rng(3)
+    blocks = []
+    cell = 4
+    for gy in range(29, 85, cell):
+        for gx in range(38, 70, cell):
+            if inside(pts, gx + cell / 2, gy + cell / 2):
+                blocks.append(F(rect(gx, gy, gx + cell, gy + cell), pal[int(rnd.integers(len(pal)))]))
+    return ([F(d, INK)] + blocks + glow(d, 2.8),
+            [S(d, "#FFF", 3.2)] + [F(b["d"], "#FFF") for i, b in enumerate(blocks) if i % 2 == 0])
+
+# ---------- concept 4: blocky pixel V + censor bar + subtle curves ----------
+V_PAT = ["XX.....XX",
+         "XX.....XX",
+         ".XX...XX.",
+         ".XX...XX.",
+         "..XX.XX..",
+         "..XX.XX..",
+         "...XXX...",
+         "...XXX...",
+         "....X...."]
+def v_blocks(grow=0.0):
+    cell = 5; x0 = 54 - 4.5 * cell; y0 = 30
+    out = []
+    for r, row in enumerate(V_PAT):
+        for c, ch in enumerate(row):
+            if ch == "X":
+                x, y = x0 + c * cell, y0 + r * cell
+                out.append(rect(x - grow, y - grow, x + cell + grow, y + cell + grow))
+    return out
+CURL = "M26,40 C21,50 21,62 27,72"
+CURR = "M82,40 C87,50 87,62 81,72"
+def pixel_v():
+    bar, bard = censor_bar(54, 58, 54, 10, -7)
+    halo2 = " ".join(v_blocks(3.2)); halo1 = " ".join(v_blocks(1.4)); core = " ".join(v_blocks())
+    hi = " ".join(rect(float(b.split()[0][1:].split(",")[0]) + 0.8, float(b.split()[0].split(",")[1]) + 0.8,
+                       float(b.split()[0][1:].split(",")[0]) + 2.2, float(b.split()[0].split(",")[1]) + 2.2)
+                  for b in v_blocks())
+    curves = [S(CURL, NEON, 5, 0.18), S(CURL, NEON, 1.8, 0.85), S(CURR, NEON, 5, 0.18), S(CURR, NEON, 1.8, 0.85)]
+    return ([F(halo2, NEON, 0.13), F(halo1, NEON, 0.3), F(core, NEON)] + curves + bar,
+            [F(core + " " + bard, "#FFF", eo=True), S(CURL, "#FFF", 2.2), S(CURR, "#FFF", 2.2)])
+
+CONCEPTS = [("lips", lips), ("hourglass", hourglass), ("keyhole", keyhole), ("pixel-v", pixel_v)]
+
+# ---------- VectorDrawable writer ----------
 def vector_xml(layers, comment):
     out = ['<?xml version="1.0" encoding="utf-8"?>',
            f'<!-- {comment} Generated by tools/make_icon.py; original artwork, AGPL-3.0-or-later. -->',
@@ -97,16 +170,20 @@ def vector_xml(layers, comment):
            '    android:width="108dp" android:height="108dp"',
            '    android:viewportWidth="108" android:viewportHeight="108">']
     for l in layers:
-        color, d = l[0], l[1]
-        ft = f' android:fillType="{l[2]}"' if len(l) > 2 else ""
-        out.append(f'    <path android:fillColor="{color}"{ft} android:pathData="{d}" />')
+        if "fill" in l:
+            a = f' android:fillAlpha="{l["alpha"]:.2f}"' if l["alpha"] < 1 else ""
+            ft = ' android:fillType="evenOdd"' if l.get("eo") else ""
+            out.append(f'    <path android:fillColor="{l["fill"]}"{a}{ft} android:pathData="{l["d"]}" />')
+        else:
+            a = f' android:strokeAlpha="{l["alpha"]:.2f}"' if l["alpha"] < 1 else ""
+            out.append(f'    <path android:strokeColor="{l["stroke"]}" android:strokeWidth="{l["width"]:.2f}"{a}'
+                       f' android:strokeLineJoin="round" android:strokeLineCap="round" android:pathData="{l["d"]}" />')
     out.append('</vector>')
     return "\n".join(out) + "\n"
 
-# ---------------- rasteriser ----------------
+# ---------- rasteriser ----------
 def flatten(d):
-    toks = d.replace(",", " ").split()
-    subs, cur, i, pt = [], [], 0, (0.0, 0.0)
+    toks = d.replace(",", " ").split(); subs, cur, i, pt, closed = [], [], 0, (0.0, 0.0), []
     def num():
         nonlocal i; v = float(toks[i]); i += 1; return v
     cmd = None
@@ -116,10 +193,10 @@ def flatten(d):
             cmd = t[0]; rest = t[1:]; i += 1
             if rest: toks.insert(i, rest)
             if cmd == 'Z':
-                if cur: subs.append(cur); cur = []
+                if cur: subs.append((cur, True)); cur = []
                 continue
         if cmd == 'M':
-            if cur: subs.append(cur)
+            if cur: subs.append((cur, False))
             pt = (num(), num()); cur = [pt]; cmd = 'L'
         elif cmd == 'L':
             pt = (num(), num()); cur.append(pt)
@@ -132,57 +209,79 @@ def flatten(d):
             pt = p3
         else:
             raise ValueError(cmd)
-    if cur: subs.append(cur)
+    if cur: subs.append((cur, False))
     return subs
 
-def hex_rgb(c):
-    c = c.lstrip("#"); return tuple(int(c[k:k+2], 16) for k in (0, 2, 4))
+def rgb(c):
+    c = c.lstrip("#")
+    if len(c) == 3: c = "".join(ch * 2 for ch in c)
+    return np.array([int(c[k:k+2], 16) for k in (0, 2, 4)], np.float32)
 
-def render(layers, size, bg=None, mono=False, ss=4, crop=(18, 90)):
-    """render the visible 72-unit region (what launchers show) at size x size"""
-    S = size * ss; a, b = crop; sc = S / (b - a)
-    img = np.zeros((S, S, 3), np.float32); alpha = np.zeros((S, S), np.float32)
-    if bg: img[:] = hex_rgb(bg); alpha[:] = 1
+def render(layers, size, ss=4, crop=(18, 90), mask=True, mono_bg=None):
+    S_ = size * ss; a, b = crop; sc = S_ / (b - a)
+    img = np.zeros((S_, S_, 3), np.float32); al = np.zeros((S_, S_), np.float32)
+    if mono_bg is not None:
+        img[:] = rgb(mono_bg); al[:] = 1
+    tf = lambda p: ((p[0] - a) * sc, (p[1] - a) * sc)
     for l in layers:
-        color, d = l[0], l[1]
-        m = np.zeros((S, S), bool)
-        for sub in flatten(d):
-            im = Image.new("1", (S, S), 0)
-            ImageDraw.Draw(im).polygon([((x - a) * sc, (y - a) * sc) for x, y in sub], fill=1)
-            sm = np.array(im, bool)
-            m = (m ^ sm) if (len(l) > 2 and l[2] == "evenOdd") else (m | sm)
-        rgb = np.array(hex_rgb("#F2EEF8" if mono else color), np.float32)
-        img[m] = rgb; alpha[m] = 1
-    if mono:  # themed icon look: tinted glyph on a pale background
-        img[alpha == 0] = hex_rgb("#3B3350"); out_alpha = np.ones_like(alpha)
-        glyph = alpha > 0; img[~glyph] = hex_rgb("#3B3350"); img[glyph] = hex_rgb("#E9DDFF")
-        alpha = out_alpha
-    rgba = np.dstack([img, alpha * 255]).astype(np.uint8)
-    im = Image.fromarray(rgba, "RGBA").resize((size, size), Image.LANCZOS)
-    # squircle-ish launcher mask
-    mask = Image.new("L", (size * ss, size * ss), 0)
-    ImageDraw.Draw(mask).rounded_rectangle([0, 0, size * ss - 1, size * ss - 1], radius=int(size * ss * 0.3), fill=255)
-    im.putalpha(Image.fromarray(np.minimum(np.array(im)[:, :, 3], np.array(mask.resize((size, size), Image.LANCZOS)))))
-    return im
+        im = Image.new("L", (S_, S_), 0); dr = ImageDraw.Draw(im)
+        if "fill" in l:
+            m = np.zeros((S_, S_), bool)
+            for sub, _ in flatten(l["d"]):
+                t = Image.new("1", (S_, S_), 0); ImageDraw.Draw(t).polygon([tf(p) for p in sub], fill=1)
+                sm = np.array(t, bool); m = (m ^ sm) if l.get("eo") else (m | sm)
+            cov = m.astype(np.float32); col = l["fill"]
+        else:
+            w = max(1, int(round(l["width"] * sc)))
+            for sub, closed in flatten(l["d"]):
+                pts = [tf(p) for p in sub] + ([tf(sub[0]), tf(sub[1])] if closed and len(sub) > 1 else [])
+                dr.line(pts, fill=255, width=w, joint="curve")
+                for p in (pts[0], pts[-1]):
+                    dr.ellipse([p[0] - w / 2, p[1] - w / 2, p[0] + w / 2, p[1] + w / 2], fill=255)
+            cov = np.array(im, np.float32) / 255; col = l["stroke"]
+        k = (cov * l["alpha"])[..., None]
+        c = rgb("#E9DDFF") if mono_bg is not None else rgb(col)
+        img = img * (1 - k) + c * k; al = al + (1 - al) * k[..., 0]
+    out = Image.fromarray(np.dstack([img, al * 255]).clip(0, 255).astype(np.uint8), "RGBA").resize((size, size), Image.LANCZOS)
+    if mask:
+        mk = Image.new("L", (S_, S_), 0)
+        ImageDraw.Draw(mk).rounded_rectangle([0, 0, S_ - 1, S_ - 1], radius=int(S_ * 0.3), fill=255)
+        out.putalpha(Image.fromarray(np.minimum(np.array(out)[:, :, 3], np.array(mk.resize((size, size), Image.LANCZOS)))))
+    return out
 
-def sheet(fg, mono, size):
-    main = render(fg, size, BG)
-    sm = size // 4
-    s = Image.new("RGBA", (size, size), (0, 0, 0, 0)); s.alpha_composite(main)
-    return main, render(mono, sm, mono=True), render(fg, sm, BG)
+def full_icon(fg, size): return render(background() + fg, size)
+def themed(mono, size): return render(mono, size, mono_bg="#2A2238")
 
 def main():
     res, out = sys.argv[1], sys.argv[2]
-    os.makedirs(out, exist_ok=True)
-    d = os.path.join(res, "drawable")
-    open(os.path.join(d, "ic_launcher_foreground.xml"), "w").write(vector_xml(peach_fg(), "Veil icon: pixel-censored peach."))
-    open(os.path.join(d, "ic_launcher_monochrome.xml"), "w").write(vector_xml(peach_mono(), "Veil themed (monochrome) icon."))
-    for name, fg, mono in (("veil-icon-preview.png", peach_fg(), peach_mono()), ("veil-icon-alt.png", alt_fg(), alt_mono())):
-        render(fg, 512, BG).save(os.path.join(out, name))
-        render(mono, 512, mono=True).save(os.path.join(out, name.replace(".png", "-themed.png")))
-    # alt XML kept alongside for an easy swap
-    open(os.path.join(out, "veil-icon-alt_foreground.xml"), "w").write(vector_xml(alt_fg(), "Veil alt icon: curvy silhouette behind pixels."))
-    open(os.path.join(out, "veil-icon-alt_monochrome.xml"), "w").write(vector_xml(alt_mono(), "Veil alt themed icon."))
+    default = sys.argv[3] if len(sys.argv) > 3 else "lips"
+    os.makedirs(out, exist_ok=True); d = os.path.join(res, "drawable")
+    open(os.path.join(d, "ic_launcher_background.xml"), "w").write(vector_xml(background(), "Veil icon background."))
+    built = {}
+    for i, (name, fn) in enumerate(CONCEPTS, 1):
+        fg, mono = fn(); built[name] = (fg, mono)
+        full_icon(fg, 512).save(os.path.join(out, f"veil-icon-concept{i}-{name}.png"))
+        themed(mono, 512).save(os.path.join(out, f"veil-icon-concept{i}-{name}-themed.png"))
+        open(os.path.join(out, f"veil-icon-concept{i}-{name}_foreground.xml"), "w").write(vector_xml(fg, f"Veil icon concept {i}: {name}."))
+        open(os.path.join(out, f"veil-icon-concept{i}-{name}_monochrome.xml"), "w").write(vector_xml(mono, f"Veil themed icon concept {i}: {name}."))
+    fg, mono = built[default]
+    open(os.path.join(d, "ic_launcher_foreground.xml"), "w").write(vector_xml(fg, f"Veil icon ({default})."))
+    open(os.path.join(d, "ic_launcher_monochrome.xml"), "w").write(vector_xml(mono, f"Veil themed icon ({default})."))
+    full_icon(fg, 512).save(os.path.join(out, "veil-icon-preview.png"))
+    themed(mono, 512).save(os.path.join(out, "veil-icon-preview-themed.png"))
+    alt = [n for n, _ in CONCEPTS if n != default][0]
+    full_icon(built[alt][0], 512).save(os.path.join(out, "veil-icon-alt.png"))
+    themed(built[alt][1], 512).save(os.path.join(out, "veil-icon-alt-themed.png"))
+    # contact sheet: 4 x 256 icons, then 48 px + 96 px + themed 96 px for each
+    W = 4 * 272 + 16; sheet = Image.new("RGBA", (W, 272 + 140), (24, 20, 28, 255))
+    for i, (name, _) in enumerate(CONCEPTS):
+        fg, mono = built[name]; x = 16 + i * 272
+        sheet.alpha_composite(full_icon(fg, 256), (x, 16))
+        sheet.alpha_composite(full_icon(fg, 48), (x, 290))
+        sheet.alpha_composite(full_icon(fg, 96), (x + 60, 290))
+        sheet.alpha_composite(themed(mono, 96), (x + 160, 290))
+    sheet.save(os.path.join(out, "veil-icon-contact-sheet.png"))
+    print("default:", default, "alt:", alt)
 
 if __name__ == "__main__":
     main()
