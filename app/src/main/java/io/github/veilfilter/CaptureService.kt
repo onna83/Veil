@@ -149,6 +149,7 @@ class CaptureService : Service() {
         p.appearanceGuardEnabled = AppSettings.appearanceGuard
         p.scrollGuardEnabled = AppSettings.scrollGuard
         p.gridBoostEnabled = AppSettings.gridBoost
+            p.censor = AppSettings.censor
         p.vsyncMs = vsync
         p.extraLeadMs = AppSettings.extraLeadMs.toFloat()
         pipeline = p
@@ -187,6 +188,7 @@ class CaptureService : Service() {
             p.appearanceGuardEnabled = AppSettings.appearanceGuard
             p.scrollGuardEnabled = AppSettings.scrollGuard
             p.gridBoostEnabled = AppSettings.gridBoost
+            p.censor = AppSettings.censor
             p.extraLeadMs = AppSettings.extraLeadMs.toFloat()
             p.onImageAvailable(rd)
         }, worker)

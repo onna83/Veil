@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.veilfilter"
         minSdk = 34
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.3.1"
+        versionCode = 6
+        versionName = "1.4.0"
         ndk {
             // Android 14+ phones are arm64. Add "x86_64" here to run on an emulator.
             abiFilters += listOf("arm64-v8a")

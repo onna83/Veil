@@ -46,6 +46,23 @@ class MainActivity : Activity() {
         val appear = findViewById<Switch>(R.id.appearance_guard)
         appear.isChecked = AppSettings.appearanceGuard
         appear.setOnCheckedChangeListener { _, v -> AppSettings.setAppearanceGuard(this, v) }
+        // What to censor (applied live)
+        val faceF = findViewById<Switch>(R.id.censor_face_female)
+        val faceM = findViewById<Switch>(R.id.censor_face_male)
+        val c = AppSettings.censor
+        fun bind(id: Int, key: String, v: Boolean, after: (Boolean) -> Unit = {}) {
+            val sw = findViewById<Switch>(id)
+            sw.isChecked = v
+            sw.setOnCheckedChangeListener { _, on -> AppSettings.setCensorFlag(this, key, on); after(on) }
+        }
+        bind(R.id.censor_exposed, AppSettings.KEY_C_EXPOSED, c.exposed)
+        bind(R.id.censor_covered, AppSettings.KEY_C_COVERED, c.covered)
+        bind(R.id.censor_belly, AppSettings.KEY_C_BELLY, c.belly)
+        bind(R.id.censor_face_female, AppSettings.KEY_C_FACE_F, c.femaleFaces)
+        bind(R.id.censor_face_male, AppSettings.KEY_C_FACE_M, c.maleFaces)
+        faceF.isEnabled = c.faces; faceM.isEnabled = c.faces
+        bind(R.id.censor_faces, AppSettings.KEY_C_FACES, c.faces) { on -> faceF.isEnabled = on; faceM.isEnabled = on }
+
         val grid = findViewById<Switch>(R.id.grid_boost)
         grid.isChecked = AppSettings.gridBoost
         grid.setOnCheckedChangeListener { _, v -> AppSettings.setGridBoost(this, v) }

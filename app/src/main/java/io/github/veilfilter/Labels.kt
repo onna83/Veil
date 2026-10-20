@@ -41,5 +41,7 @@ object Labels {
     fun mask(names: Set<String>): BooleanArray =
         BooleanArray(NUM_CLASSES) { NAMES[it] in names }
 
+    fun index(name: String): Int = NAMES.indexOf(name).also { require(it >= 0) { "unknown label $name" } }
+
     fun allMask(): BooleanArray = BooleanArray(NUM_CLASSES) { true }
 }

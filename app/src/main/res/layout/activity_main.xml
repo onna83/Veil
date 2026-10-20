@@ -60,11 +60,68 @@
             android:layout_height="wrap_content"
             android:text="@string/grant_notifications" />
 
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/what_to_censor"
+            android:textStyle="bold" />
+
+        <Switch
+            android:id="@+id/censor_exposed"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="48dp"
+            android:text="@string/censor_exposed" />
+
+        <Switch
+            android:id="@+id/censor_covered"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="48dp"
+            android:text="@string/censor_covered" />
+
+        <Switch
+            android:id="@+id/censor_belly"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="48dp"
+            android:text="@string/censor_belly" />
+
+        <Switch
+            android:id="@+id/censor_faces"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="48dp"
+            android:text="@string/censor_faces" />
+
+        <Switch
+            android:id="@+id/censor_face_female"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="32dp"
+            android:minHeight="48dp"
+            android:text="@string/censor_face_female" />
+
+        <Switch
+            android:id="@+id/censor_face_male"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="32dp"
+            android:minHeight="48dp"
+            android:text="@string/censor_face_male" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/protection"
+            android:textStyle="bold" />
+
         <Switch
             android:id="@+id/scene_guard"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
             android:minHeight="48dp"
             android:text="@string/scene_guard" />
 

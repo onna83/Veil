@@ -39,6 +39,20 @@ class Tracker(
     var fastMissTimeoutMs: Long = 800,
     val maxTracks: Int = 16,
 ) {
+    /** per-class thresholds (null = use the scalar defaults above) */
+    var startByClass: FloatArray? = null
+    var keepByClass: FloatArray? = null
+    var fastKeepByClass: FloatArray? = null
+    private fun startOf(c: Int) = startByClass?.getOrNull(c) ?: startThreshold
+    private fun keepOf(c: Int) = keepByClass?.getOrNull(c) ?: keepThreshold
+    private fun fastKeepOf(c: Int) = fastKeepByClass?.getOrNull(c) ?: fastKeepThreshold
+
+    /** Apply a class set live: thresholds, and drop tracks of classes no longer censored. */
+    fun applyClasses(mask: BooleanArray, start: FloatArray, keep: FloatArray, fastKeep: FloatArray) {
+        startByClass = start; keepByClass = keep; fastKeepByClass = fastKeep
+        tracks.removeAll { it.cls !in mask.indices || !mask[it.cls] }
+    }
+
     class Track(val id: Int) {
         var cls = 0
         var score = 0f
@@ -130,7 +144,8 @@ class Tracker(
             val fast = tr.seenSpeed > fastSpeed
             for (i in 0 until nd) {
                 // weak detections only keep fast (blurred) tracks alive
-                pairIou[j * 64 + i] = if (dScore[i] < keepThreshold && !(fast && dScore[i] >= fastKeepThreshold)) 0f
+                val c = dCls[i]
+                pairIou[j * 64 + i] = if (dScore[i] < keepOf(c) && !(fast && dScore[i] >= fastKeepOf(c))) 0f
                 else YoloDecoder.iou(px1, py1, px2, py2, dx1[i], dy1[i], dx2[i], dy2[i])
             }
         }
@@ -194,7 +209,7 @@ class Tracker(
 
         // unmatched detections: new tracks (only confident ones)
         for (i in 0 until nd) {
-            if (detUsed[i] || dScore[i] < startThreshold) continue
+            if (detUsed[i] || dScore[i] < startOf(dCls[i])) continue
             if (tracks.size >= maxTracks) break
             val tr = Track(nextId++) // rare; ids are never reused
             tr.x1 = dx1[i]; tr.y1 = dy1[i]; tr.x2 = dx2[i]; tr.y2 = dy2[i]

@@ -42,7 +42,9 @@ class Pipeline(
     private val shift = ShiftEstimator()
     private val appear = AppearanceGuard()
     private val trackRects = FloatArray(4 * 20)
-    private val classMask = Labels.mask(Labels.CENSORED_NAMES)
+    /** what to censor; swapped live from settings (read on both threads) */
+    @Volatile var censor = CensorConfig()
+    private var appliedCensor: CensorConfig? = null
 
     private var frame = ByteArray(0)
     private var fw = 0
@@ -277,7 +279,8 @@ class Pipeline(
         // 3. scene-cut guard (our own censors masked; a confident scroll is not a cut)
         val t2 = System.nanoTime()
         val cutRaw = guard.analyze(frame, w, h, stride, excl, nExcl)
-        val cut = CutGate.fire(sceneGuardEnabled, cutRaw, scrolling, tCap, lastScrollT)
+        val cfg = censor
+        val cut = CutGate.fire(sceneGuardEnabled && cfg.any, cutRaw, scrolling, tCap, lastScrollT)
         if (scrolling) cutGuard = null // never hold a full-screen cover while the user scrolls
         if (cut) {
             cutGuard = buildGuardBox(tCap)
@@ -297,7 +300,7 @@ class Pipeline(
             }
             appear.analyze(
                 frame, w, h, stride, excl, nExcl, trackRects, nt, cumX, cumY, frameId, tCap,
-                trigger = appearanceGuardEnabled && !recentScroll,
+                trigger = appearanceGuardEnabled && cfg.skinGuard && !recentScroll,
             )
             mAppear.add(appear.lastMs)
             if (gridBoostEnabled) {
@@ -437,6 +440,20 @@ class Pipeline(
         for (i in 0 until r.count) {
             r.x1[i] += ox; r.x2[i] += ox; r.y1[i] += oy; r.y2[i] += oy
         }
+        val cfg = censor
+        if (cfg != appliedCensor) {
+            tracker.applyClasses(cfg.mask, cfg.start, cfg.keep, cfg.fastKeep)
+            appliedCensor = cfg
+        }
+        // drop detections decoded under a previous class set
+        var kept = 0
+        for (i in 0 until r.count) {
+            if (!cfg.mask[r.cls[i]]) continue
+            r.x1[kept] = r.x1[i]; r.y1[kept] = r.y1[i]; r.x2[kept] = r.x2[i]; r.y2[kept] = r.y2[i]
+            r.score[kept] = r.score[i]; r.cls[kept] = r.cls[i]; r.clipped[kept] = r.clipped[i]
+            kept++
+        }
+        r.count = kept
         val tile = r.region >= 0
         tracker.update(
             r.count, r.x1, r.y1, r.x2, r.y2, r.score, r.cls, now, r.cut && !tile,
@@ -625,10 +642,11 @@ class Pipeline(
                 } ?: break
                 tiles.commit(slot.region, slot.tCap, slot.cumX, slot.cumY)
                 val tStart = System.nanoTime()
+                val cfgNow = censor
                 val out = det.run(slot.pre.output)
                 val tInf = System.nanoTime()
                 val n = decoder.decode(
-                    out, det.coordScale, slot.pre.scale, tracker.fastKeepThreshold, classMask,
+                    out, det.coordScale, slot.pre.scale, cfgNow.decodeThreshold, cfgNow.mask,
                     classAware = true, iouThreshold = 0.45f, maxX = slot.rw.toFloat(), maxY = slot.rh.toFloat(),
                 )
                 val r = DetResult(max(n, 1))
@@ -693,7 +711,7 @@ class Pipeline(
         val appearPath = trackPath // guard boxes are published in the same pass as tracks
         val detPath = dispToCap + mCopy.v + mAnalyze.v + mPre.v + mQueue.v + mInfer.v + mDecode.v + mPost.v +
             overlay + toScreen
-        val ag = if (!appearanceGuardEnabled) "off" else String.format(
+        val ag = if (!appearanceGuardEnabled || !censor.skinGuard) "off" else String.format(
             java.util.Locale.US, "%.2f ms, boxes %d, new cells %d, fired %d",
             mAppear.v, appear.boxes.size, appear.lastNewCells, appear.triggers,
         )
@@ -708,6 +726,7 @@ class Pipeline(
             "%s | %s\ncapture: %s | %.0f x %d\n" +
                 "cap %.1f fps (int %.1f) deliver %.1f copy %.2f\n" +
                 "shift %.2f guard %.2f analyze+publish %.2f pre %.2f\n" +
+                "censor: %s\n" +
                 "appear guard: %s\n" +
                 "grid boost: %s\n" +
                 "det %.1f fps: queue %.1f infer %.1f decode %.2f post %.2f\n" +
@@ -718,7 +737,7 @@ class Pipeline(
             backendName, socInfo, mode, fw.toFloat(), fh,
             capFps, mInterval.v, mDeliver.v, mCopy.v,
             mShift.v, mGuard.v, mAnalyze.v, mPre.v,
-            ag, gb,
+            censor.label(), ag, gb,
             detFps, mQueue.v, mInfer.v, mDecode.v, mPost.v,
             r.hopMsEma, r.applyMsEma, r.layoutMsEma, r.relayoutsPerSec, r.drawsPerSec,
             if (pl > 0) String.format(java.util.Locale.US, "%.0f ms", pl) else "n/a", r.leadMs, vsyncMs,

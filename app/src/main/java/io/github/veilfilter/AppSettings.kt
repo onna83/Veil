@@ -14,6 +14,29 @@ object AppSettings {
     private const val KEY_APPEAR = "appearance_guard"
     private const val KEY_SCROLL = "scroll_guard"
     private const val KEY_GRID = "grid_boost"
+    const val KEY_C_EXPOSED = "censor_exposed"
+    const val KEY_C_COVERED = "censor_covered"
+    const val KEY_C_BELLY = "censor_belly"
+    const val KEY_C_FACES = "censor_faces"
+    const val KEY_C_FACE_F = "censor_face_female"
+    const val KEY_C_FACE_M = "censor_face_male"
+
+    /** settings -> class set (pure; unit-tested). Defaults: exposed on, everything else off. */
+    fun censorFrom(get: (key: String, default: Boolean) -> Boolean) = CensorConfig(
+        exposed = get(KEY_C_EXPOSED, true),
+        covered = get(KEY_C_COVERED, false),
+        belly = get(KEY_C_BELLY, false),
+        faces = get(KEY_C_FACES, false),
+        femaleFaces = get(KEY_C_FACE_F, true),
+        maleFaces = get(KEY_C_FACE_M, true),
+    )
+
+    /** current class set; replaced (never mutated) on every change, read live by the pipeline */
+    @Volatile var censor = CensorConfig(); private set
+    fun setCensorFlag(ctx: Context, key: String, v: Boolean) {
+        val p = prefs(ctx); p.edit().putBoolean(key, v).apply()
+        censor = censorFrom { k, d -> if (k == key) v else p.getBoolean(k, d) }
+    }
 
     @Volatile var sceneGuard = true; private set
     @Volatile var debugHud = false; private set
@@ -42,6 +65,7 @@ object AppSettings {
         if (Backends.options.none { it.id == backend }) backend = "auto"
         fast256 = p.getBoolean(KEY_FAST, false)
         extraLeadMs = p.getInt(KEY_LEAD, 0).coerceIn(0, MAX_LEAD)
+        censor = censorFrom { k, d -> p.getBoolean(k, d) }
         loaded = true
     }
 

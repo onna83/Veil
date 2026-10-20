@@ -1,4 +1,4 @@
-# Veil (v1.3.1)
+# Veil (v1.4)
 
 Veil is a free, open-source, **fully on-device** nudity filter for Android 14+.
 It watches the screen with MediaProjection, runs the NudeNet v3 `320n` detector
@@ -13,6 +13,24 @@ translations.
 > **Status:** v1 ran on a Galaxy S23 FE (censoring works; visible lag while
 > scrolling). v1.1 targets that scroll lag. It compiles and its core logic is
 > unit-tested on the JVM, but **v1.1 has not run on a device yet.**
+
+## What's new in v1.4 (choose what to censor)
+
+Settings → **What to censor** (persisted, applied live while running; no restart needed):
+
+| toggle | NudeNet classes | default | start / keep threshold |
+|---|---|---|---|
+| Exposed intimate parts | FEMALE_BREAST_EXPOSED, FEMALE_GENITALIA_EXPOSED, MALE_GENITALIA_EXPOSED, BUTTOCKS_EXPOSED, ANUS_EXPOSED | on | 0.30 / 0.20 (unchanged safety bias) |
+| Covered / clothed versions | FEMALE_BREAST_COVERED, FEMALE_GENITALIA_COVERED, BUTTOCKS_COVERED, ANUS_COVERED | off | 0.40 / 0.25 |
+| Exposed belly | BELLY_EXPOSED | off | 0.40 / 0.25 |
+| Faces → Female / Male | FACE_FEMALE, FACE_MALE | off (sub-options on) | 0.35 / 0.20 |
+
+The label names were checked against NudeNet's label list and the model metadata (`Labels.kt`).
+- The fast-motion keep threshold is 0.6 × keep.
+- The decoder, the full-frame and tile passes, and the tracker all use the enabled set. Turning a group off drops its boxes at once.
+- The scene-cut guard is only active when at least one group is enabled.
+- The skin-colour appearance guard only runs when exposed parts or belly are enabled. Faces do not make it more aggressive: skin-coloured new content is too common to do that without flicker.
+- The HUD has a `censor:` line, e.g. `exposed+covered+faces(F,M)`.
 
 ## What's new in v1.3 (no pre-emptive covering while scrolling, grids, fast motion, icon)
 

@@ -14,6 +14,14 @@
     <string name="recommend_title">Recommended: choose \"A single app\"</string>
     <string name="tip">In the capture dialog pick \"A single app\" and choose the app you want filtered. Why: Veil\'s own censor boxes are then NOT part of the captured image, so the detector always sees the real content (it re-checks censored areas every frame), the scroll guard can work, and censors drop the moment content leaves.\n\nWith \"Entire screen\" Veil captures its own censors and is blind underneath them: it has to guess where censored content went by following the page scroll, so it is less reliable and the scroll guard is off.</string>
     <string name="advanced">Advanced</string>
+    <string name="what_to_censor">What to censor</string>
+    <string name="protection">Protection</string>
+    <string name="censor_exposed">Exposed intimate parts (breasts, genitals, buttocks, anus)</string>
+    <string name="censor_covered">Covered / clothed versions (underwear, swimwear, tight clothing)</string>
+    <string name="censor_belly">Exposed belly</string>
+    <string name="censor_faces">Faces</string>
+    <string name="censor_face_female">Female faces</string>
+    <string name="censor_face_male">Male faces</string>
     <string name="backend_label">Detector backend (%1$s)</string>
     <string name="fast256">Fast mode: 256 px model input (EXPERIMENTAL – faster, but misses more)</string>
     <string name="benchmark">Benchmark detector backends</string>
