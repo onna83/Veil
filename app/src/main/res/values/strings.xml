@@ -91,6 +91,11 @@
     <string name="grid_boost_summary">Extra passes on thumbnail grids · next start</string>
     <string name="fresh_wait">Fresh-frame wait</string>
     <string name="fresh_wait_summary">Detect on the newest frame for lower lag</string>
+    <string name="smoothing">Box smoothing</string>
+    <string name="smoothing_dialog">Box smoothing</string>
+    <string name="smoothing_off">Off (v1.8 behaviour)</string>
+    <string name="smoothing_normal">Normal: steadier boxes, same speed</string>
+    <string name="smoothing_strong">Strong: steadiest boxes</string>
     <string name="lead">Scroll prediction</string>
     <string name="lead_summary">Raise if censors trail while scrolling</string>
     <string name="lead_value">+%1$d ms</string>
@@ -160,6 +165,8 @@
     <string name="a11y_service_label">Veil accessibility mode</string>
     <string name="a11y_service_summary">One overlay for all censors, scroll hints, and checks under Veil’s censors</string>
     <string name="a11y_service_description">Optional mode of Veil (off unless you also switch it on in the app). Veil uses: one touch-through overlay window that draws its censors; the timing of scroll and window-change events; the bounds of the top app window; and, on Android 14+, occasional in-memory snapshots of that window to check what is under Veil’s own censors. Veil never reads text or view content, never performs actions, and nothing leaves the phone.</string>
+    <string name="about_v181">New in 1.8.1</string>
+    <string name="about_v181_text">Steadier censor boxes at the same speed: smoothed motion estimates, still boxes that stay still, steady pixel blocks and stable rounding. Try Performance › Box smoothing (Normal, Strong, or Off for 1.8 behaviour).</string>
     <string name="about_v18">New in 1.8</string>
     <string name="about_v18_text">Portrait model input (224×480: 1.5× the resolution of 320×320 on a phone screen at about the same cost), landscape folded into it, a smoother prediction horizon, and an optional accessibility mode. Extra GPU models download from the Veil GitHub release.</string>
 </resources>

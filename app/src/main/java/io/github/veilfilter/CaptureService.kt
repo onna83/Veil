@@ -189,6 +189,7 @@ class CaptureService : Service() {
         p.blockPx = AppSettings.blockCapturePx(AppSettings.pixelDp, resources.displayMetrics.density, capW, screenW)
         p.extraLeadMs = AppSettings.extraLeadMs.toFloat()
         p.freshWaitEnabled = AppSettings.freshWait
+        p.tuning = AppSettings.smoothing.tuning
     }
 
     // ---- v1.7 floating control (main thread) ----

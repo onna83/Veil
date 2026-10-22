@@ -86,6 +86,9 @@ class Tracker(
         var keepMs = 0L
         /** v1.8: consecutive clean-frame verifications that did not find this (occluded) track */
         var verifyMiss = 0
+        /** v1.8.1: filtered object velocity (1-euro) and smoothed half size while moving */
+        val fvx = OneEuro(); val fvy = OneEuro()
+        var shw = 0f; var shh = 0f
         fun speed() = kotlin.math.sqrt(vx * vx + vy * vy)
         /** speed at the last detection (not damped while unobserved) */
         var seenSpeed = 0f
@@ -111,6 +114,9 @@ class Tracker(
     }
 
     companion object { const val HIST = 3 }
+
+    /** v1.8.1 anti-jitter parameters (V18 = v1.8 behaviour); set by the pipeline */
+    var tuning: MotionTuning = MotionTuning.V18
 
     private var nextId = 1
     val tracks = ArrayList<Track>(maxTracks)
@@ -258,6 +264,8 @@ class Tracker(
             tr.occludedSince = Long.MIN_VALUE / 2
             tr.confirmedAt = now
             tr.keepMs = keepMs
+            tr.fvx.clear(); tr.fvy.clear()
+            tr.shw = (dx2[i] - dx1[i]) * 0.5f; tr.shh = (dy2[i] - dy1[i]) * 0.5f
             tracks.add(tr)
         }
     }
@@ -275,7 +283,14 @@ class Tracker(
         val mvx = if (haveMv) (mcx - tr.lmx) / mdt else 0f
         val mvy = if (haveMv) (mcy - tr.lmy) / mdt else 0f
         // displacement vs the track's own (predicted) box: one measurement's noise, not two
-        val disp = max(kotlin.math.abs(mcx - (px1 + px2) * 0.5f), kotlin.math.abs(mcy - (py1 + py2) * 0.5f))
+        var disp = max(kotlin.math.abs(mcx - (px1 + px2) * 0.5f), kotlin.math.abs(mcy - (py1 + py2) * 0.5f))
+        if (!tuning.legacy && haveMv) {
+            // v1.8.1: innovation against the last MEASUREMENT (predicted with the track
+            // velocity), not against the hysteresis box: that box is deliberately off-centre
+            // (grows at once, shrinks slowly), so detector noise made still boxes "move"
+            // and flip between snapped and free geometry. A real motion still triggers at once.
+            disp = max(kotlin.math.abs(mcx - tr.lmx - tr.vx * mdt), kotlin.math.abs(mcy - tr.lmy - tr.vy * mdt))
+        }
         val dead = max(deadbandPx, deadbandFrac * max(mx2 - mx1, my2 - my1))
         val wasMoving = tr.moving
         // a gap (track lost for a while, then re-found) restarts the motion history
@@ -305,8 +320,15 @@ class Tracker(
         // sways), or one big jump. Leaves the moving state only after 2 still measurements.
         val small = min(mx2 - mx1, my2 - my1)
         val motion = max(kotlin.math.abs(fvx), kotlin.math.abs(fvy)) * span
-        val movingNow = motion > max(deadbandPx + 2f, motionFrac * small) || disp > dead
+        // v1.8.1: a 3-point fit over ~35 ms sees 1.5 px detector noise as ~2 px of "motion";
+        // entering the moving state (not staying in it) needs a clearer margin. Real motion
+        // is still caught within one detection by the innovation test, and a still box
+        // always grows at once to cover the detection, so this cannot uncover anything.
+        val gate = if (!tuning.legacy && !wasMoving) tuning.onsetGate else 1f
+        val movingNow = motion > gate * max(deadbandPx + 2f, motionFrac * small) || disp > dead
         if (movingNow) { tr.moving = true; tr.stillCount = 0 } else if (++tr.stillCount >= 2) tr.moving = false
+        val onset = tr.moving && !wasMoving
+        val tu = tuning
         if (tr.moving && !wasMoving && tr.hN > 2) {
             // motion onset: the still part of the history would halve the first estimate
             fvx = mvx; fvy = mvy; fcx = mcx; fcy = mcy
@@ -317,7 +339,29 @@ class Tracker(
             // (unbiased for steady motion, about half the noise of a 2-point difference),
             // size from the latest measurement
             if (tr.hN >= 2) { tr.vx = fvx; tr.vy = fvy } else if (haveMv) { tr.vx = mvx; tr.vy = mvy }
-            val hw = (mx2 - mx1) * 0.5f; val hh = (my2 - my1) * 0.5f
+            var hw = (mx2 - mx1) * 0.5f; var hh = (my2 - my1) * 0.5f
+            if (!tu.legacy) {
+                // v1.8.1: velocity noise is what the 60-230 ms extrapolation amplifies.
+                // Filter it (1-euro: fast on real acceleration, smooth when steady), trust a
+                // one-measurement onset only partly, and extrapolate nothing for tiny speeds.
+                // The box POSITION still follows the measurement (no added lag).
+                if (onset || !tr.fvx.ready || !haveMv) {
+                    val sure = motion > max(deadbandPx + 2f, motionFrac * small) || disp > 2f * dead
+                    val k = if (sure || tr.hits == 1) 1f else tu.onsetTrust
+                    tr.fvx.reset(tr.vx * k); tr.fvy.reset(tr.vy * k)
+                } else {
+                    tr.fvx.filter(tr.vx, mdt, tu.tMinCutoffHz, tu.tBeta, tu.tDCutoffHz)
+                    tr.fvy.filter(tr.vy, mdt, tu.tMinCutoffHz, tu.tBeta, tu.tDCutoffHz)
+                }
+                val vfx = tr.fvx.value; val vfy = tr.fvy.value
+                val g = OneEuro.deadZoneGain(kotlin.math.sqrt(vfx * vfx + vfy * vfy), tu.vDead0, tu.vDead1)
+                tr.vx = vfx * g; tr.vy = vfy * g
+                // size: grow at once (cover), shrink slowly (detector size noise, tile vs full
+                // passes, fold seam merges), never smaller than the measurement
+                tr.shw = if (onset || hw >= tr.shw) hw else tr.shw + (hw - tr.shw) * tu.sizeShrink
+                tr.shh = if (onset || hh >= tr.shh) hh else tr.shh + (hh - tr.shh) * tu.sizeShrink
+                hw = tr.shw; hh = tr.shh
+            }
             // (never under-cover the latest measurement: the fit is unbiased, so this only
             // adds its few px of noise offset, not lag)
             tr.x1 = min(fcx - hw, mx1); tr.x2 = max(fcx + hw, mx2); tr.y1 = min(fcy - hh, my1); tr.y2 = max(fcy + hh, my2)
@@ -339,6 +383,10 @@ class Tracker(
             }
             tr.x1 = min(lo(px1, mx1), mx1); tr.y1 = min(lo(py1, my1), my1)
             tr.x2 = max(hi(px2, mx2), mx2); tr.y2 = max(hi(py2, my2), my2)
+            if (!tu.legacy) {
+                tr.fvx.clear(); tr.fvy.clear()
+                tr.shw = (tr.x2 - tr.x1) * 0.5f; tr.shh = (tr.y2 - tr.y1) * 0.5f
+            }
         }
         // limit to something physically plausible
         tr.vx = tr.vx.coerceIn(-2f, 2f)

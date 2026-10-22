@@ -1,4 +1,4 @@
-# Veil (v1.8)
+# Veil (v1.8.1)
 
 Veil is a free, open-source, **fully on-device** nudity filter for Android 14+.
 It watches the screen with MediaProjection, runs the NudeNet v3 detector
@@ -14,6 +14,67 @@ translations.
 > **Status:** v1 ran on a Galaxy S23 FE (censoring works; visible lag while
 > scrolling). v1.1 targets that scroll lag. It compiles and its core logic is
 > unit-tested on the JVM, but **v1.1 has not run on a device yet.**
+
+## What's new in v1.8.1 (steadier boxes)
+
+Feedback on v1.8 (Galaxy S23 FE): "still a bit jittery". v1.8.1 makes the
+censor boxes steadier **without adding lag**. Nothing is censored earlier
+than before, and no box is drawn smaller than the detection. It has only been
+measured in a synthetic replay (below), **not yet on a device**.
+
+What changed:
+
+* **Filtered velocity, not position.** Page-scroll velocity and object
+  velocity now go through a 1-euro filter, which smooths steady motion but
+  follows starts and stops at once. A stop or reversal resets the filter,
+  so there is no overshoot. Positions still come straight from the newest
+  frame and detection.
+* **Tiny velocities are ignored.** A soft dead zone stops sub-pixel detector
+  noise from being extrapolated 60–200 ms ahead.
+* **Still boxes stay still.** v1.8 decided "this object is moving" from
+  1.5 px of detector noise about once a second, and then the box switched
+  geometry (20–30 px jumps). Starting to move now needs a clearer signal.
+  Real motion is still caught within one detection, and a still box always
+  grows at once to cover a new detection.
+* **Size noise:** moving boxes grow at once but shrink slowly.
+* **Irregular capture gaps** (dropped frames) no longer brake the extrapolation
+  and then snap it forward.
+* **Pixel blocks:** still boxes keep their snapped block edges until the
+  detection is clearly past them. Moving boxes keep a whole-block grid
+  anchored to the box, with hysteresis on the block count, so the pattern no
+  longer re-cuts every frame.
+* **Rounding:** overlay windows (and the accessibility-mode sheet) now take
+  their width and height from the box size and round the centre, so edges no
+  longer flicker by 1 px. One extra pixel keeps the box covering.
+
+**New setting: Performance › Speed › Box smoothing.** Normal (the default),
+Strong (steadiest) or Off (exactly v1.8, for comparison).
+
+### Measured (synthetic replay, `tools/jitter_sim.sh`)
+
+The replay runs the real tracker, box-shaping and rounding code on a
+simulated S23 FE timeline:
+
+* 120 Hz display; vsync-aligned capture at about 60 fps with dropped frames;
+* detector noise of 1.5 px centre and 2 px size, plus ±4 % scale flips;
+* about 20 ms detection;
+* screen px, 12 seeds.
+
+Jitter is the frame-to-frame box-centre movement that does not match the
+content (0 = moves exactly with it). Lag ms below 0 means the box is ahead
+of the content (the intended lead).
+
+| scenario | jitter RMS / p95 (v1.8 → Normal → Strong) | leak % (v1.8 → Normal → Strong) | lag ms (v1.8 → Normal) | block-count changes/s (v1.8 → Normal) |
+|---|---|---|---|---|
+| stationary | 5.43 / 8.0 → 3.04 / 0.0 → 2.37 / 0.0 | 0.83 → 0.16 → 0.07 | 0 → 0 | 7.1 → 3.1 |
+| slow scroll | 5.06 / 8.5 → 3.52 / 3.3 → 2.85 / 2.7 | 0.61 → 0.36 → 0.04 | −11.3 → −13.4 | 7.5 → 3.5 |
+| steady scroll | 7.90 / 12.3 → 6.67 / 12.2 → 6.18 / 12.2 | 0.76 → 0.69 → 0.19 | −12.0 → −13.0 | 10.3 → 5.3 |
+| fling + stop | 13.6 / 22.4 → 13.5 / 13.8 → 13.0 / 12.9 | 3.33 → 1.86 → 1.72 | −23.4 → −26.4 | 10.1 → 5.6 |
+| moving object | 12.5 / 28.5 → 7.33 / 13.3 → 6.81 / 11.2 | 1.12 → 0.27 → 0.37 | −16.8 → −16.4 | 23.0 → 9.6 |
+
+Fling overshoot after the stop: 33 → 20 px (Strong 16). The full table is in
+`tools/jitter_report.md`. The fling's single largest frame step is the
+catch-up in the first ~40 ms of a sudden fling. It happens in every mode.
 
 ## What's new in v1.8 (portrait input, accessibility mode, steadier prediction)
 

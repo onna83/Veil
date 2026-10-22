@@ -255,6 +255,20 @@ class PerformanceActivity : Screen() {
         val sp = Ui.card(content)
         Ui.switchRow(sp, R.string.grid_boost, R.string.grid_boost_summary, AppSettings.gridBoost) { AppSettings.setGridBoost(this, it) }
         Ui.switchRow(sp, R.string.fresh_wait, R.string.fresh_wait_summary, AppSettings.freshWait) { AppSettings.setFreshWait(this, it) }
+        lateinit var smoothSummary: TextView
+        val smoothLabels = intArrayOf(R.string.smoothing_off, R.string.smoothing_normal, R.string.smoothing_strong)
+        fun smoothText() = getString(smoothLabels[AppSettings.smoothing.ordinal])
+        smoothSummary = Ui.infoRow(sp, R.string.smoothing, smoothText()) {
+            MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.smoothing_dialog)
+                .setSingleChoiceItems(smoothLabels.map { getString(it) }.toTypedArray(), AppSettings.smoothing.ordinal) { dlg, which ->
+                    AppSettings.setSmoothing(this, Smoothing.entries[which])
+                    smoothSummary.text = smoothText()
+                    dlg.dismiss()
+                }
+                .setNegativeButton(R.string.cancel, null)
+                .show()
+        }
         Ui.sliderRow(sp, R.string.lead, R.string.lead_summary, 0, AppSettings.MAX_LEAD, AppSettings.extraLeadMs,
             { getString(R.string.lead_value, it) }) { AppSettings.setExtraLead(this, it) }
 
@@ -372,6 +386,7 @@ class AboutActivity : Screen() {
         Ui.header(content, R.string.about_good_to_know)
         val g = Ui.card(content)
         Ui.infoRow(g, R.string.about_capture, getString(R.string.about_capture_text))
+        Ui.infoRow(g, R.string.about_v181, getString(R.string.about_v181_text))
         Ui.infoRow(g, R.string.about_v18, getString(R.string.about_v18_text))
         Ui.infoRow(g, R.string.about_limits, getString(R.string.about_limits_text))
     }

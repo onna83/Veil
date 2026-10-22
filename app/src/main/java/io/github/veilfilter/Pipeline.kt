@@ -113,7 +113,11 @@ class Pipeline(
     private val excl = FloatArray(4 * 40)
     private var nExcl = 0
 
-    private class Pix(var cols: Int, var rows: Int, var colors: IntArray?) { var gx = Int.MIN_VALUE; var gy = Int.MIN_VALUE }
+    private class Pix(var cols: Int, var rows: Int, var colors: IntArray?) {
+        var gx = Int.MIN_VALUE; var gy = Int.MIN_VALUE
+        /** v1.8.1 block-grid memory for hysteresis */
+        val grid = BoxShaper.Grid()
+    }
     private val pix = HashMap<Int, Pix>()
     private val tmpIds = HashSet<Int>()
     private val toRemove = ArrayList<Tracker.Track>()
@@ -135,6 +139,11 @@ class Pipeline(
     @Volatile var extraLeadMs = 0f
     /** pixelation block size in capture px (from the Pixel size setting), read live */
     @Volatile var blockPx = 16f
+    /** v1.8.1 anti-jitter tuning (Performance › Box smoothing), read live */
+    @Volatile var tuning: MotionTuning = MotionTuning.NORMAL
+    private val gmotion = GlobalMotion()
+    private val gaps = GapTracker()
+    private val shape = BoxShaper.Shape()
 
     // ---------------- inference hand-off ----------------
     private class Slot(w: Int, h: Int) {
@@ -235,6 +244,7 @@ class Pipeline(
         pendingCut = false
         haveDet = false
         gvx = 0f; gvy = 0f
+        gmotion.reset(); gaps.reset()
         staleIds.clear(); verifyAt = Long.MAX_VALUE; cleanBytes = null; fullLay = null
         synchronized(lock) { for (s in slots) if (s.state == READY) { s.state = FREE; s.clean = false } }
         renderer.submit(RenderState(fw, fh, emptyList(), nowMs(), System.nanoTime()))
@@ -279,6 +289,9 @@ class Pipeline(
         val t0 = System.nanoTime()
         frameId++
         val w = fw; val h = fh
+        val tu = tuning
+        tracker.tuning = tu
+        renderer.stableRounding = tu.stableRounding
         // v1.8 accessibility hints (no-ops while the mode is off)
         hintScroll = a11yMode && hints.scrolling(tCap)
         renderer.scrollActive = hintScroll
@@ -324,20 +337,13 @@ class Pipeline(
                 tracker.applyShift(dx, dy)
                 appear.applyShift(dx, dy)
             }
-            if (interval in 1f..200f) {
-                // fast response: scroll start/stop must not lag the page
-                val k = 0.6f
-                gvx = gvx * (1 - k) + (dx / interval) * k
-                gvy = gvy * (1 - k) + (dy / interval) * k
-            } else { gvx = 0f; gvy = 0f }
-            if (shift.static) { gvx = 0f; gvy = 0f }
-        } else {
-            // v1.8: while the app itself reports scrolling, an unsure estimate is not "stopped"
-            val d = if (hintScroll) 0.9f else 0.5f
-            gvx *= d; gvy *= d
         }
-        if (abs(gvx) < 0.005f) gvx = 0f
-        if (abs(gvy) < 0.005f) gvy = 0f
+        // page velocity: v1.8 per-frame EMA, or (v1.8.1) a 1-euro filter on the velocity
+        // only: start / stop / reversal are taken at once, steady scrolls are smoothed.
+        // (while the app reports scrolling, an unsure estimate is not "stopped")
+        gmotion.update(dx, dy, interval, shift.confident, shift.static, hintScroll, tu)
+        gvx = gmotion.vx; gvy = gmotion.vy
+        if (interval > 0f) gaps.add(interval)
         lastDx = dx; lastDy = dy
         scrolling = shift.confident && !shift.static && (abs(dx) >= 0.5f || abs(dy) >= 0.5f)
         if (scrolling || hintScroll) lastScrollT = tCap
@@ -478,7 +484,10 @@ class Pipeline(
         // v1.8 horizon: exact lead up to the knee, then a bounded tail (see Prediction)
         val cap = model.predictCapMs.toFloat()
         renderer.capMs = cap
-        renderer.kneeMs = Prediction.knee(mDeliver.v, mAnalyze.v, renderer.hopMsEma, lead, mInterval.v, vsyncMs, cap)
+        // v1.8.1: the knee also covers the recent worst capture gap (irregular MediaProjection
+        // delivery), so a steadily moving box is not braked and then snapped forward
+        val gap = if (tuning.gapKnee) GapTracker.term(gaps.gapMs, mInterval.v) else 0f
+        renderer.kneeMs = Prediction.knee(mDeliver.v, mAnalyze.v, renderer.hopMsEma, lead, mInterval.v, vsyncMs, cap, gap)
     }
 
     /** the full-frame model input layout for the current capture size */
@@ -744,46 +753,22 @@ class Pipeline(
         val out = ArrayList<CensorBox>(tracker.tracks.size + 2)
         tmpIds.clear()
         val mx = tracker.maxExtrapolateMs
+        val tu = tuning
+        val bpx = blockPx.coerceAtLeast(2f)
         for (tr in tracker.tracks) {
             tmpIds.add(tr.id)
             val occluded = tr.isOccluded(tCap, tracker.occludedGraceMs)
-            // residual (object) motion + global (page) motion
-            val vx = (if (occluded) 0f else tr.vx) + gvx
-            val vy = (if (occluded) 0f else tr.vy) + gvy
-            var x1 = tr.predictX1(tCap, mx); var y1 = tr.predictY1(tCap, mx)
-            var x2 = tr.predictX2(tCap, mx); var y2 = tr.predictY2(tCap, mx)
-            val bw = x2 - x1; val bh = y2 - y1
-            val px = bw * PAD + MIN_PAD
-            val py = bh * PAD + MIN_PAD
-            // pad ahead of the motion: object motion x detector latency (fast movement leaks
-            // otherwise), page motion only a little (it is predicted precisely)
-            // (v1.6.1: positions are already predicted over the detector latency, so the
-            // pad only covers velocity error: half the age, bounded)
-            val padMs = (0.5f * mDetAge.v).coerceIn(15f, 60f)
-            // object-motion lead only for real motion (velocity noise must not breathe the box)
-            val moving = !occluded && tr.speed() > LEAD_MIN_SPEED
-            val rvx = if (moving) tr.vx else 0f; val rvy = if (moving) tr.vy else 0f
-            val leadX = rvx * padMs + gvx * LEAD_PAD_GLOBAL_MS
-            val leadY = rvy * padMs + gvy * LEAD_PAD_GLOBAL_MS
-            x1 -= px + max(-leadX, 0f); x2 += px + max(leadX, 0f)
-            y1 -= py + max(-leadY, 0f); y2 += py + max(leadY, 0f)
-            // snap outward to a block grid anchored to the CONTENT (moves with the scroll):
-            // blocks stay glued to what they cover, and the box only resizes in whole blocks
-            // (still tracks only: a moving box must move smoothly, not in whole-block steps)
-            val bpx = blockPx.coerceAtLeast(2f)
-            val snap = !tr.moving
-            var gix = Int.MIN_VALUE; var giy = Int.MIN_VALUE
-            if (snap) {
-                val gox = (cumX % bpx).toFloat(); val goy = (cumY % bpx).toFloat()
-                x1 = Pixelator.floorTo(x1, gox, bpx); y1 = Pixelator.floorTo(y1, goy, bpx)
-                x2 = Pixelator.ceilTo(x2, gox, bpx); y2 = Pixelator.ceilTo(y2, goy, bpx)
-                gix = kotlin.math.round((x1 - gox) / bpx).toInt() - kotlin.math.floor(cumX / bpx).toInt()
-                giy = kotlin.math.round((y1 - goy) / bpx).toInt() - kotlin.math.floor(cumY / bpx).toInt()
-            }
-            x1 = max(x1, 0f); y1 = max(y1, 0f); x2 = min(x2, w); y2 = min(y2, h)
-            if (x2 - x1 < 1f || y2 - y1 < 1f) continue
-
             var p = pix[tr.id]
+            if (p == null) { p = Pix(1, 1, null); pix[tr.id] = p }
+            // geometry (prediction, pad, motion lead, block grid): see BoxShaper
+            val sh = shape
+            if (!BoxShaper.shape(tr, tCap, mx, occluded, gvx, gvy, mDetAge.v, blockPx, cumX, cumY, w, h,
+                    if (occluded) null else p.grid, tu, sh)) continue
+            val x1 = sh.x1; val y1 = sh.y1; val x2 = sh.x2; val y2 = sh.y2
+            val vx = sh.vx; val vy = sh.vy
+            val snap = sh.snap || sh.gix == BoxShaper.ANCHORED
+            val gix = sh.gix; val giy = sh.giy
+
             val colors: IntArray?
             if (occluded) {
                 // The capture shows our own censor here: keep the last clean pixels
@@ -802,8 +787,8 @@ class Pipeline(
                 }
                 colors = p.colors
             } else {
-                val cols = Pixelator.blocksOf(x2 - x1, bpx)
-                val rows = Pixelator.blocksOf(y2 - y1, bpx)
+                val cols = sh.cols
+                val rows = sh.rows
                 val c = IntArray(cols * rows) // published arrays are immutable
                 Pixelator.sampleBlocks(frame, fw, fh, stride, x1, y1, x2, y2, cols, rows, c)
                 // same blocks over the same content as last frame: smooth colours (no shimmer)
@@ -1030,11 +1015,8 @@ class Pipeline(
         const val CSV_HEADER_F = "F,frame,tCapMs,intervalMs,deliverMs,copyMs,shiftMs,guardMs,analyzeMs,preMs,dx,dy,confident,tracks,mode,cut,appearMs,appearBoxes"
         const val CSV_HEADER_D = "D,frame,tCapMs,queueMs,inferMs,decodeMs,postMs,ageMs,dets,compX,compY"
         const val OCCLUSION_DIFF = 10f
-        const val PAD = 0.10f
-        const val MIN_PAD = 3f
-        const val LEAD_PAD_GLOBAL_MS = 20f
-        /** residual speed (px/ms) below which no motion lead padding is added */
-        const val LEAD_MIN_SPEED = 0.05f
+        const val PAD = BoxShaper.PAD
+        const val MIN_PAD = BoxShaper.MIN_PAD
         /** quiet time after a scroll before pre-emptive guards may fire again */
         const val SCROLL_QUIET_MS = 150L
         /** v1.8: a new screen is judged on frames captured this long after the window change */

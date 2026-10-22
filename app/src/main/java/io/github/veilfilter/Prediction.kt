@@ -42,8 +42,12 @@ object Prediction {
      * main-thread hop, draw-to-screen lead, plus 1.5 capture intervals (the next
      * frame is due by then). Clamped to [2 vsync, cap].
      */
-    fun knee(deliverMs: Float, analyzeMs: Float, hopMs: Float, leadMs: Float, intervalMs: Float, vsyncMs: Float, capMs: Float): Float {
+    fun knee(
+        deliverMs: Float, analyzeMs: Float, hopMs: Float, leadMs: Float, intervalMs: Float, vsyncMs: Float, capMs: Float,
+        /** v1.8.1: recent worst capture gap term ([GapTracker.term]); 0 = v1.8 */
+        gapMs: Float = 0f,
+    ): Float {
         val iv = if (intervalMs in 1f..200f) intervalMs else vsyncMs
-        return (deliverMs + analyzeMs + hopMs + leadMs + 1.5f * iv).coerceIn(2f * vsyncMs, capMs)
+        return (deliverMs + analyzeMs + hopMs + leadMs + max(1.5f * iv, gapMs)).coerceIn(2f * vsyncMs, capMs)
     }
 }

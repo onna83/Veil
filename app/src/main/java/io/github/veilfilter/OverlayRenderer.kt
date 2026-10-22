@@ -66,6 +66,9 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
     @Volatile var kneeMs = 50f
     @Volatile var capMs = MAX_EXTRAPOLATE_MS.toFloat()
     @Volatile var scrollActive = false
+    /** v1.8.1: width/height from the box size, position rounded once (see [place]) */
+    @Volatile var stableRounding = true
+    private val placed = IntArray(4)
 
     // ---- v1.8 accessibility mode: ONE full-screen TYPE_ACCESSIBILITY_OVERLAY window ----
     private var sheet: CensorSheet? = null
@@ -197,12 +200,8 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
             val dt = Prediction.effectiveDt((target - b.tMs).toFloat(), knee, cap)
             val vx = b.vx; val vy = b.vy
             if (vx != 0f || vy != 0f) anyMoving = true
-            val l = floor(contentRect.left + (b.x1 + vx * dt) * sx).toInt()
-            val t = floor(contentRect.top + (b.y1 + vy * dt) * sy).toInt()
-            val r = ceil(contentRect.left + (b.x2 + vx * dt) * sx).toInt()
-            val bt = ceil(contentRect.top + (b.y2 + vy * dt) * sy).toInt()
-            val w = max(r - l, 1)
-            val h = max(bt - t, 1)
+            place(b.x1, b.y1, b.x2, b.y2, vx, vy, dt, contentRect.left.toFloat(), contentRect.top.toFloat(), sx, sy, stableRounding, placed)
+            val l = placed[0]; val t = placed[1]; val w = placed[2]; val h = placed[3]
             val lp = slot.lp
             val v = slot.view
             // margin ahead of the motion (screen px for ~MARGIN_MS of travel)
@@ -260,12 +259,8 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
             val dt = Prediction.effectiveDt((target - b.tMs).toFloat(), knee, cap)
             val vx = b.vx; val vy = b.vy
             if (vx != 0f || vy != 0f) anyMoving = true
-            val l = floor(contentRect.left + (b.x1 + vx * dt) * sx).toInt()
-            val t = floor(contentRect.top + (b.y1 + vy * dt) * sy).toInt()
-            val r = ceil(contentRect.left + (b.x2 + vx * dt) * sx).toInt()
-            val bt = ceil(contentRect.top + (b.y2 + vy * dt) * sy).toInt()
-            val w = max(r - l, 1)
-            val h = max(bt - t, 1)
+            place(b.x1, b.y1, b.x2, b.y2, vx, vy, dt, contentRect.left.toFloat(), contentRect.top.toFloat(), sx, sy, stableRounding, placed)
+            val l = placed[0]; val t = placed[1]; val w = placed[2]; val h = placed[3]
             v.put(b.id, l - ox, t - oy, w, h, b.cols, b.rows, b.colors)
             val first = sheetFirstShown.getOrPut(b.id) { now }
             val dl = (l - contentRect.left) / sx
@@ -688,6 +683,34 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
         private const val TAG = "VeilOverlay"
         private const val NONE = Int.MIN_VALUE
         const val MAX_WINDOWS = 16
+
+        /**
+         * Screen rectangle (out = left, top, width, height) of a capture-space box
+         * extrapolated by [dt] ms. v1.8 ([stable] false) rounded each edge outward
+         * (floor left, ceil right), so a box moving by sub-pixel steps changed width
+         * by 1 px back and forth and its pixel blocks rescaled: visible shimmer.
+         * v1.8.1: the size is rounded once from the box size and only the position
+         * moves (rounded to nearest).
+         */
+        fun place(
+            x1: Float, y1: Float, x2: Float, y2: Float, vx: Float, vy: Float, dt: Float,
+            left: Float, top: Float, sx: Float, sy: Float, stable: Boolean, out: IntArray,
+        ) {
+            val fl = left + (x1 + vx * dt) * sx; val ft = top + (y1 + vy * dt) * sy
+            val fr = left + (x2 + vx * dt) * sx; val fb = top + (y2 + vy * dt) * sy
+            if (!stable) {
+                val l = floor(fl).toInt(); val t = floor(ft).toInt()
+                out[0] = l; out[1] = t
+                out[2] = max(ceil(fr).toInt() - l, 1); out[3] = max(ceil(fb).toInt() - t, 1)
+                return
+            }
+            // +1: the centre is rounded (<= 0.5 px each way), so this always covers the float box
+            val w = max(ceil((x2 - x1) * sx - 0.05f).toInt() + 1, 1)
+            val h = max(ceil((y2 - y1) * sy - 0.05f).toInt() + 1, 1)
+            out[0] = floor((fl + fr) * 0.5f - w * 0.5f + 0.5f).toInt()
+            out[1] = floor((ft + fb) * 0.5f - h * 0.5f + 0.5f).toInt()
+            out[2] = w; out[3] = h
+        }
         /** accessibility mode draws every box in one view; bounded anyway */
         const val MAX_SHEET_BOXES = 64
         const val MAX_EXTRAPOLATE_MS = 200L

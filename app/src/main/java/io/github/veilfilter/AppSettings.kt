@@ -21,6 +21,7 @@ object AppSettings {
     private const val KEY_BASE_URL = "model_base_url"
     private const val KEY_NNAPI = "ort_nnapi"
     private const val KEY_FRESH = "fresh_wait"
+    private const val KEY_SMOOTH = "smoothing"
     private const val KEY_FLOAT = "floating_control"
     private const val KEY_BUBBLE_RIGHT = "bubble_right"
     private const val KEY_BUBBLE_Y = "bubble_y_frac"
@@ -67,6 +68,8 @@ object AppSettings {
     @Volatile var csvLog = false; private set
     /** v1.7: fresh-frame wait (v1.6.1 behaviour, now switchable), read live */
     @Volatile var freshWait = true; private set
+    /** v1.8.1: box smoothing (velocity filter + stable geometry); OFF = exact v1.8, read live */
+    @Volatile var smoothing = Smoothing.NORMAL; private set
     /** v1.7: floating quick-action bubble while protection runs */
     @Volatile var floatingControl = true; private set
     @Volatile var bubbleRight = true; private set
@@ -95,6 +98,7 @@ object AppSettings {
         gridBoost = p.getBoolean(KEY_GRID, true)
         csvLog = p.getBoolean(KEY_CSV, false)
         freshWait = p.getBoolean(KEY_FRESH, true)
+        smoothing = Smoothing.byId(p.getString(KEY_SMOOTH, null)) ?: Smoothing.NORMAL
         floatingControl = p.getBoolean(KEY_FLOAT, true)
         bubbleRight = p.getBoolean(KEY_BUBBLE_RIGHT, true)
         bubbleYFrac = p.getFloat(KEY_BUBBLE_Y, 0.35f).coerceIn(0f, 1f)
@@ -121,6 +125,7 @@ object AppSettings {
     fun removeListener(l: () -> Unit) { listeners.remove(l) }
     private fun changed() { for (l in listeners) l() }
 
+    fun setSmoothing(ctx: Context, v: Smoothing) { smoothing = v; prefs(ctx).edit().putString(KEY_SMOOTH, v.id).apply(); changed() }
     fun setFreshWait(ctx: Context, v: Boolean) { freshWait = v; prefs(ctx).edit().putBoolean(KEY_FRESH, v).apply(); changed() }
     fun setFloatingControl(ctx: Context, v: Boolean) { floatingControl = v; prefs(ctx).edit().putBoolean(KEY_FLOAT, v).apply(); changed() }
     fun setBubblePos(ctx: Context, right: Boolean, yFrac: Float) {
