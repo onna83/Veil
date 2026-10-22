@@ -84,6 +84,8 @@ class Tracker(
         var confirmedAt = Long.MIN_VALUE / 2
         /** extra keep-alive (ms) for tracks found by tile passes, which revisit slowly */
         var keepMs = 0L
+        /** v1.8: consecutive clean-frame verifications that did not find this (occluded) track */
+        var verifyMiss = 0
         fun speed() = kotlin.math.sqrt(vx * vx + vy * vy)
         /** speed at the last detection (not damped while unobserved) */
         var seenSpeed = 0f

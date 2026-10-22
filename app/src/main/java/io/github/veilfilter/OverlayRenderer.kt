@@ -62,6 +62,20 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
     /** How far ahead of the frame time boxes are extrapolated (set by the pipeline). */
     @Volatile var leadMs = 16f
     @Volatile var vsyncMs = 16.7f
+    /** v1.8 prediction ([Prediction]): normal box age at the glass, per-model cap, app scroll hint */
+    @Volatile var kneeMs = 50f
+    @Volatile var capMs = MAX_EXTRAPOLATE_MS.toFloat()
+    @Volatile var scrollActive = false
+
+    // ---- v1.8 accessibility mode: ONE full-screen TYPE_ACCESSIBILITY_OVERLAY window ----
+    private var sheet: CensorSheet? = null
+    private var sheetWm: WindowManager? = null
+    private var sheetLp: WindowManager.LayoutParams? = null
+    private val sheetOrigin = IntArray(2)
+    private val sheetFirstShown = HashMap<Int, Long>()
+    private val sheetSeen = HashSet<Int>()
+    /** censors are drawn by the single accessibility overlay (any thread) */
+    @Volatile var sheetActive = false; private set
 
     // ---- metrics (read from any thread) ----
     @Volatile var applyMsEma = 0f; private set
@@ -166,7 +180,8 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
     /** @return true if anything is moving (keep animating). */
     private fun apply(frameTimeNs: Long): Boolean {
         val s = state
-        if (s == null || s.frameW <= 0 || contentRect.isEmpty) { parkAll(); return false }
+        if (s == null || s.frameW <= 0 || contentRect.isEmpty) { parkAll(); sheet?.clearAll(); drawnMap.clear(); return false }
+        if (sheet != null) return applySheet(s, frameTimeNs)
         val sx = contentRect.width().toFloat() / s.frameW
         val sy = contentRect.height().toFloat() / s.frameH
         val target = frameTimeNs / 1_000_000L + leadMs.toLong()
@@ -174,10 +189,12 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
         for (sl in slots) sl.used = false
         var anyMoving = false
         val maxMargin = 0.25f * max(contentRect.width(), contentRect.height())
+        val knee = kneeMs
+        val cap = Prediction.capFor(capMs, knee, scrollActive)
         for (b in s.boxes) {
             val slot = slotFor(b.id, s) ?: break
             slot.used = true
-            val dt = min(max(target - b.tMs, 0L), MAX_EXTRAPOLATE_MS).toFloat()
+            val dt = Prediction.effectiveDt((target - b.tMs).toFloat(), knee, cap)
             val vx = b.vx; val vy = b.vy
             if (vx != 0f || vy != 0f) anyMoving = true
             val l = floor(contentRect.left + (b.x1 + vx * dt) * sx).toInt()
@@ -220,6 +237,115 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
         }
         for (sl in slots) if (!sl.used) park(sl)
         return anyMoving
+    }
+
+    /**
+     * Accessibility mode: every censor is a rectangle in ONE full-screen view, so a
+     * move is a redraw of that view on the next vsync, never a WindowManager relayout.
+     */
+    private fun applySheet(s: RenderState, frameTimeNs: Long): Boolean {
+        val v = sheet ?: return false
+        val sx = contentRect.width().toFloat() / s.frameW
+        val sy = contentRect.height().toFloat() / s.frameH
+        val target = frameTimeNs / 1_000_000L + leadMs.toLong()
+        val now = frameTimeNs / 1_000_000L
+        val knee = kneeMs
+        val cap = Prediction.capFor(capMs, knee, scrollActive)
+        var anyMoving = false
+        val ox = sheetOrigin[0]; val oy = sheetOrigin[1]
+        v.begin()
+        sheetSeen.clear()
+        for (b in s.boxes) {
+            if (sheetSeen.size >= MAX_SHEET_BOXES) break
+            val dt = Prediction.effectiveDt((target - b.tMs).toFloat(), knee, cap)
+            val vx = b.vx; val vy = b.vy
+            if (vx != 0f || vy != 0f) anyMoving = true
+            val l = floor(contentRect.left + (b.x1 + vx * dt) * sx).toInt()
+            val t = floor(contentRect.top + (b.y1 + vy * dt) * sy).toInt()
+            val r = ceil(contentRect.left + (b.x2 + vx * dt) * sx).toInt()
+            val bt = ceil(contentRect.top + (b.y2 + vy * dt) * sy).toInt()
+            val w = max(r - l, 1)
+            val h = max(bt - t, 1)
+            v.put(b.id, l - ox, t - oy, w, h, b.cols, b.rows, b.colors)
+            val first = sheetFirstShown.getOrPut(b.id) { now }
+            val dl = (l - contentRect.left) / sx
+            val dtp = (t - contentRect.top) / sy
+            drawnMap[b.id] = DrawnBox(
+                dl, dtp, dl + w / sx, dtp + h / sy,
+                if (b.colors == null) 1 else b.cols, if (b.colors == null) 1 else b.rows,
+                b.colors ?: DARK_BLOCK, first,
+            )
+            sheetSeen.add(b.id)
+        }
+        if (v.end()) draws++
+        if (drawnMap.size > sheetSeen.size) drawnMap.keys.retainAll(sheetSeen)
+        if (sheetFirstShown.size > sheetSeen.size) sheetFirstShown.keys.retainAll(sheetSeen)
+        return anyMoving
+    }
+
+    /**
+     * Main thread. Switch to the single full-screen accessibility overlay, created
+     * through the accessibility service's own window manager ([a11yCtx] = the
+     * service). Touch-through (NOT_TOUCHABLE) and fully opaque censors: accessibility
+     * overlays are trusted windows, so Android's untrusted-overlay touch blocking does
+     * not apply. @return false if the window could not be added (caller keeps the
+     * per-box windows).
+     */
+    fun attachSheet(a11yCtx: Context): Boolean {
+        if (released) return false
+        if (sheet != null) return true
+        val wmA = a11yCtx.getSystemService(WindowManager::class.java) ?: return false
+        val v = CensorSheet(a11yCtx)
+        val b = wmA.maximumWindowMetrics.bounds
+        val lp = sheetParams(b.width(), b.height())
+        try { wmA.addView(v, lp) } catch (e: Exception) { Log.w(TAG, "accessibility overlay failed", e); return false }
+        v.addOnLayoutChangeListener { vv, _, _, _, _, _, _, _, _ -> vv.getLocationOnScreen(sheetOrigin) }
+        sheet = v; sheetWm = wmA; sheetLp = lp; sheetActive = true
+        parkAll()
+        drawnMap.clear(); sheetFirstShown.clear()
+        main.removeCallbacks(applyNew); main.post(applyNew)
+        return true
+    }
+
+    /** Main thread: back to the per-box windows (mode switched off / service gone). */
+    fun detachSheet() {
+        val v = sheet ?: return
+        try { sheetWm?.removeViewImmediate(v) } catch (_: Exception) {}
+        sheet = null; sheetWm = null; sheetLp = null; sheetActive = false
+        drawnMap.clear(); sheetFirstShown.clear()
+        main.removeCallbacks(applyNew); main.post(applyNew)
+    }
+
+    /** Main thread: display rotated / resized. */
+    fun resizeSheet() {
+        val v = sheet ?: return
+        val wmA = sheetWm ?: return
+        val lp = sheetLp ?: return
+        val b = wmA.maximumWindowMetrics.bounds
+        if (lp.width == b.width() && lp.height == b.height()) return
+        lp.width = b.width(); lp.height = b.height()
+        try { wmA.updateViewLayout(v, lp) } catch (_: Exception) {}
+    }
+
+    @SuppressLint("RtlHardcoded")
+    private fun sheetParams(w: Int, h: Int) = WindowManager.LayoutParams(
+        w, h,
+        WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+        PixelFormat.TRANSLUCENT,
+    ).apply {
+        gravity = Gravity.TOP or Gravity.LEFT
+        x = 0; y = 0
+        alpha = 1f
+        layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+        fitInsetsTypes = 0
+        windowAnimations = 0
+        setCanPlayMoveAnimation(false)
+        title = "Veil censors (accessibility)"
     }
 
     private fun slotFor(id: Int, st: RenderState): Slot? {
@@ -297,7 +423,7 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
 
     fun clear() {
         state = null
-        main.post { parkAll() }
+        main.post { parkAll(); sheet?.clearAll(); if (sheet != null) drawnMap.clear() }
     }
 
     // ---- capture probe ----
@@ -417,6 +543,8 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
         released = true
         choreographer.removeFrameCallback(this)
         main.removeCallbacks(applyNew)
+        sheet?.let { try { sheetWm?.removeViewImmediate(it) } catch (_: Exception) {} }
+        sheet = null; sheetActive = false
         for (sl in slots) try { wm.removeViewImmediate(sl.view) } catch (_: Exception) {}
         slots.clear()
         hud?.let { try { wm.removeViewImmediate(it) } catch (_: Exception) {} }
@@ -481,6 +609,73 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
         }
     }
 
+    /**
+     * v1.8: all censors in one full-screen view (accessibility mode). Each entry is a
+     * cols x rows pixelation bitmap (nearest-neighbour upscaled) or a dark fill.
+     */
+    private class CensorSheet(ctx: Context) : View(ctx) {
+        private class E {
+            val r = Rect()
+            var colors: IntArray? = null
+            var bmp: Bitmap? = null
+            var live = false
+        }
+        private val entries = HashMap<Int, E>()
+        private val order = ArrayList<E>()
+        private var changed = false
+        private val paint = Paint().apply { isFilterBitmap = false; isAntiAlias = false; isDither = false }
+        private val dark = Paint().apply { color = DARK }
+
+        fun begin() {
+            for (e in entries.values) e.live = false
+            order.clear()
+        }
+
+        fun put(id: Int, x: Int, y: Int, w: Int, h: Int, cols: Int, rows: Int, c: IntArray?) {
+            var e = entries[id]
+            if (e == null) { e = E(); entries[id] = e; changed = true }
+            e.live = true
+            if (e.r.left != x || e.r.top != y || e.r.width() != w || e.r.height() != h) {
+                e.r.set(x, y, x + w, y + h); changed = true
+            }
+            if (c !== e.colors) {
+                e.colors = c; changed = true
+                if (c != null && cols > 0 && rows > 0 && c.size >= cols * rows) {
+                    var b = e.bmp
+                    if (b == null || b.width != cols || b.height != rows) {
+                        b = Bitmap.createBitmap(cols, rows, Bitmap.Config.ARGB_8888); e.bmp = b
+                    }
+                    b.setPixels(c, 0, cols, 0, 0, cols, rows)
+                }
+            }
+            order.add(e)
+        }
+
+        /** @return true if a redraw was requested */
+        fun end(): Boolean {
+            val it = entries.values.iterator()
+            while (it.hasNext()) if (!it.next().live) { it.remove(); changed = true }
+            if (!changed) return false
+            changed = false
+            invalidate()
+            return true
+        }
+
+        fun clearAll() {
+            if (entries.isEmpty()) return
+            entries.clear(); order.clear()
+            invalidate()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            canvas.drawColor(Color.TRANSPARENT, BlendMode.CLEAR)
+            for (e in order) {
+                val b = e.bmp
+                if (e.colors == null || b == null) canvas.drawRect(e.r, dark) else canvas.drawBitmap(b, null, e.r, paint)
+            }
+        }
+    }
+
     private class ProbeView(ctx: Context, private val probe: CaptureProbe) : View(ctx) {
         override fun onDraw(canvas: Canvas) {
             val i = probe.currentIndex()
@@ -493,6 +688,8 @@ class OverlayRenderer(private val ctx: Context, private val probe: CaptureProbe)
         private const val TAG = "VeilOverlay"
         private const val NONE = Int.MIN_VALUE
         const val MAX_WINDOWS = 16
+        /** accessibility mode draws every box in one view; bounded anyway */
+        const val MAX_SHEET_BOXES = 64
         const val MAX_EXTRAPOLATE_MS = 200L
         /** window headroom along the motion, in ms of travel */
         const val MARGIN_MS = 120f

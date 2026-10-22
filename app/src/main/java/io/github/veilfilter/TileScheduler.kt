@@ -29,7 +29,9 @@ class TileScheduler(
     var coldEvery: Int = 4,
     var minRevisitMs: Long = 100,
 ) {
-    class Tile(val x: Int, val y: Int, val side: Int) {
+    /** v1.8: tiles have the model's aspect ([w] x [h]); square models: w == h == side */
+    class Tile(val x: Int, val y: Int, val w: Int, val h: Int = w) {
+        val side: Int get() = w
         var lastVisit = Long.MIN_VALUE / 2
         var visitCumX = 0.0
         var visitCumY = 0.0
@@ -42,6 +44,7 @@ class TileScheduler(
     var tiles: List<Tile> = emptyList(); private set
     private var w = 0
     private var h = 0
+    private var aspect = 1f
     private var passesSinceTile = 0
     private var forceFull = false
     @Volatile var bigContent = false
@@ -61,10 +64,12 @@ class TileScheduler(
     /** ms between visits of the same hot tile (EMA) */
     var cycleMsEma = 0f; private set
 
-    @Synchronized fun layout(fw: Int, fh: Int) {
-        if (fw == w && fh == h) return
-        w = fw; h = fh
-        tiles = compute(fw, fh, across, overlap).map { Tile(it[0], it[1], it[2]) }
+    /** [tileAspect] = tile height / width = model input height / width (1 for square models) */
+    @Synchronized fun layout(fw: Int, fh: Int, tileAspect: Float = 1f) {
+        if (fw == w && fh == h && tileAspect == aspect) return
+        w = fw; h = fh; aspect = tileAspect
+        tiles = if (tileAspect == 1f) compute(fw, fh, across, overlap).map { Tile(it[0], it[1], it[2]) }
+        else computeRect(fw, fh, across, overlap, tileAspect).map { Tile(it[0], it[1], it[2], it[3]) }
     }
 
     /**
@@ -73,8 +78,8 @@ class TileScheduler(
      */
     @Synchronized fun observe(skin: FloatArray, cols: Int, rows: Int, cell: Int, cumX: Double, cumY: Double, nowMs: Long) {
         for (t in tiles) {
-            val i0 = t.x / cell; val i1 = min(cols - 1, (t.x + t.side) / cell - 1)
-            val j0 = t.y / cell; val j1 = min(rows - 1, (t.y + t.side) / cell - 1)
+            val i0 = t.x / cell; val i1 = min(cols - 1, (t.x + t.w) / cell - 1)
+            val j0 = t.y / cell; val j1 = min(rows - 1, (t.y + t.h) / cell - 1)
             var n = 0; var sk = 0
             for (j in j0..j1) for (i in i0..i1) {
                 val v = skin[j * cols + i]
@@ -83,7 +88,7 @@ class TileScheduler(
             }
             val frac = if (n == 0) 0f else sk.toFloat() / n
             t.skinNow = frac
-            val moved = abs(cumX - t.visitCumX) > 0.1 * t.side || abs(cumY - t.visitCumY) > 0.1 * t.side
+            val moved = abs(cumX - t.visitCumX) > 0.1 * min(t.w, t.h) || abs(cumY - t.visitCumY) > 0.1 * min(t.w, t.h)
             val changed = t.visitSkin < 0f || abs(frac - t.visitSkin) > 0.05f
             t.hot = frac >= MIN_SKIN_FRACTION && (moved || changed) && nowMs - t.lastVisit >= minRevisitMs
         }
@@ -146,6 +151,32 @@ class TileScheduler(
         const val SKIN_CELL = 0.4f
         const val MIN_SKIN_FRACTION = 0.03f
         private fun ema(o: Float, v: Float) = if (o == 0f) v else o * 0.8f + v * 0.2f
+
+        /**
+         * v1.8: tiles of aspect [a] (height / width, e.g. 480 / 224 for the portrait
+         * model). Portrait frame: [across] tiles over the width; landscape frame:
+         * one row of full-height tiles. [ov] overlap between neighbours. [x, y, w, h]
+         */
+        fun computeRect(fw: Int, fh: Int, across: Int, ov: Float, a: Float): List<IntArray> {
+            var tw: Int; var th: Int
+            if (fw <= fh) {
+                tw = if (across <= 1) fw else (fw / (across - (across - 1) * ov)).toInt()
+                th = (tw * a).roundToInt()
+                if (th > fh) { th = fh; tw = (fh / a).roundToInt() }
+            } else {
+                th = fh; tw = (fh / a).roundToInt()
+                if (tw > fw) { tw = fw; th = (fw * a).roundToInt() }
+            }
+            tw = max(1, min(tw, fw)); th = max(1, min(th, fh))
+            fun pos(len: Int, t: Int): List<Int> {
+                if (t >= len) return listOf(0)
+                val n = ceil((len - t) / (t * (1 - ov))).toInt() + 1
+                return (0 until n).map { (it * (len - t).toFloat() / (n - 1)).roundToInt() }
+            }
+            val out = ArrayList<IntArray>()
+            for (q in pos(fh, th)) for (p in pos(fw, tw)) out.add(intArrayOf(p, q, tw, th))
+            return out
+        }
 
         /** Square tiles: [across] over the short side with [ov] overlap, as many as needed along the long side. */
         fun compute(fw: Int, fh: Int, across: Int, ov: Float): List<IntArray> {

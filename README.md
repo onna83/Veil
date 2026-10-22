@@ -1,4 +1,4 @@
-# Veil (v1.7)
+# Veil (v1.8)
 
 Veil is a free, open-source, **fully on-device** nudity filter for Android 14+.
 It watches the screen with MediaProjection, runs the NudeNet v3 detector
@@ -14,6 +14,110 @@ translations.
 > **Status:** v1 ran on a Galaxy S23 FE (censoring works; visible lag while
 > scrolling). v1.1 targets that scroll lag. It compiles and its core logic is
 > unit-tested on the JVM, but **v1.1 has not run on a device yet.**
+
+## What's new in v1.8 (portrait input, accessibility mode, steadier prediction)
+
+v1.8 adapts ideas from a static review of another on-device filter to Veil's
+own GPU path. Everything is implemented from scratch here; no code, assets,
+text or model from that app are used. **v1.8 has not run on a device yet**:
+it compiles, its logic is unit-tested on the JVM and the models were checked
+on the build machine (numbers below).
+
+### 1. Portrait model input (new default, bundled)
+
+A phone screen is about 1 : 2.17 (S23 FE capture 590 × 1280). v1.7's square
+320 × 320 letterbox put the whole screen into a 148 × 320 strip; 54 % of the
+input was padding. v1.8 exports the NudeNet 320n weights at fixed portrait
+shapes (FP16 TFLite, sides multiples of 32) and picks the input layout from
+the capture aspect:
+
+| model | input | scale on 590 × 1280 | input pixels vs 320² | box CPU, 4 thr / 1 thr | est. S23 FE GPU | where |
+|---|---|---|---|---|---|---|
+| 320n square (v1.7 default) | 320 × 320 | 0.250 | 1.00× | 6.3 / 18.4 ms | 16–24 ms (measured) | download |
+| **320n p224 (default)** | 224 × 480 | **0.375** (1.5×) | 1.05× | 6.3 / 19.5 ms | ~17–25 ms | **bundled** |
+| 320n p256 | 256 × 544 | 0.425 | 1.36× | 7.8 / 25.8 ms | ~22–33 ms | download |
+| 320n p288 | 288 × 608 | 0.475 | 1.71× | 9.6 / 32.7 ms | ~27–41 ms | download |
+| 320n p320 | 320 × 704 | 0.542 | 2.20× | 11.6 / 41.8 ms | ~35–53 ms | download |
+
+GPU numbers are the measured square-320 figure scaled by input pixels
+(estimates). **Landscape** (full-screen video): the frame's left and right
+halves (6 % overlap) are stacked into the portrait input ("fold"), so content
+stays upright, rotation needs no model reload, and the scale is 0.313 for p224
+(v1.7: 0.25). Boxes that straddle the seam are merged. Grid-boost tiles take
+the model's aspect. The capture size is unchanged (long side 1280 with grid
+boost).
+
+**Recall check** (`tools/parity.py`, `tools/parity_vs_640m.py`; SFW images
+only: 61 COCO-128 photos with people, the Ultralytics bus/zidane samples and a
+synthetic feed page, placed on 221 portrait/landscape phone canvases; score ≥ 0.3):
+
+| model | recall of 640m@640 boxes, portrait (all / non-face) | landscape (all / non-face) |
+|---|---|---|
+| 320n square (v1.7) | 41.3 % / 12.2 % | 47.6 % / 26.7 % |
+| **320n p224** | **62.7 % / 36.7 %** | **52.4 % / 40.0 %** |
+| 320n p256 | 66.7 % / 44.9 % | 69.0 % / 60.0 % |
+| 320n p288 | 73.8 % / 53.1 % | 88.1 % / 100 % |
+| 320n p320 | 81.7 % / 79.6 % | 88.1 % / 93.3 % |
+
+p224 finds 116 boxes where v1.7 found 82. It keeps 62 of v1.7's 82 boxes; of
+the 20 it drops, only 3 are confirmed by 640m (the rest are mostly faces near
+the threshold). The export matches the PyTorch weights (max box difference
+1e-6 FP32, 3e-4 FP16). Sample sets are small and contain no nudity, so these
+numbers are a sanity check, not a benchmark of the censored classes.
+
+### 2. GPU-side zero-copy capture: not done, on purpose
+
+The CPU stages (global shift, scene-cut guard, skin/appearance guard, ring
+checks, pixel colours for the censors) need the full RGBA frame every frame
+anyway, so the frame is still copied once from the ImageReader. Neither
+LiteRT 1.4's GpuDelegate nor LiteRT 2's TensorBuffer API (Java/Kotlin) can bind
+an external AHardwareBuffer/GL texture as model input. That would need our
+own NDK code that cannot be tested without a device. The portrait input
+removes most of the letterbox waste instead: almost every input pixel is
+content, and the padding is zero-filled only when the layout changes.
+
+### 3. Optional Accessibility mode (Performance › Accessibility mode)
+
+Off by default. The first switch-on opens a disclosure screen; Android's
+accessibility setting must also be on. When active:
+- **One full-screen TYPE_ACCESSIBILITY_OVERLAY window** (touch-through, fully
+  opaque censors) draws all boxes in one view. A box move is a redraw on the
+  next vsync, never a WindowManager relayout. When the mode is off or the
+  service is not connected, the v1.7 per-box windows are used.
+- **Event hints:** TYPE_VIEW_SCROLLED keeps "scrolling" true for 250 ms. A
+  scroll is never treated as a scene cut, extrapolation keeps the page velocity
+  through unsure shift estimates, and nothing is covered pre-emptively (the
+  scroll-entry strip is off). A different activity or foreground window
+  (window-state/windows-changed) marks the current boxes stale: the first full
+  detector pass 200 ms later drops those it does not find again.
+- **Android 14+ verification:** while a censor covers something, Veil takes
+  `takeScreenshotOfWindow` of the foreground app window (at most every 500 ms,
+  never while scrolling, backs off when the system throttles). That window does
+  not contain Veil's overlay, so the detector can see what is under our own
+  censors. Boxes not found twice are retired (once after a screen change), and
+  the censor's pixels are refreshed from it. Kept in memory only, scaled to the
+  capture size, never saved or sent.
+- It reads **no text or view content**: only event types and times, the
+  package/class of window-state events, and the id, type, layer and bounds of
+  windows.
+
+### 4. Stronger vsync extrapolation, without overshoot
+
+Boxes are placed at `pos(tCap) + v · dt`. Up to a knee (capture delivery +
+analysis + hop + draw-to-glass lead + 1.5 capture intervals: the age a box
+normally has) `dt` is the real age, so boxes lead the motion exactly. Past
+the knee no newer frame came although one was due, which with MediaProjection
+usually means the content stopped. `dt` then saturates smoothly. Without a
+scroll hint the tail is at most 40 ms; while the app reports scrolling it may
+run to the per-model cap (180 ms for p224/square 320, 200–230 ms for larger
+models). v1.7 extrapolated linearly to 200 ms, which overshot after a fling
+stopped.
+
+### HUD
+
+New lines show the input layout (fit/fold, scale, fill), the prediction knee
+and cap, and the accessibility state (overlay mode, scroll events, screen
+changes, verifications / drops / failures).
 
 ## What's new in v1.7 (clean UI, floating control)
 
@@ -182,7 +286,8 @@ download URL. An HTML response (a login or rate-limit page) is rejected.
   GitHub release. Then enter the base URL under Advanced → "TFLite model host".
   Veil appends the file name. The shipped default
   (`ModelSize.DEFAULT_BASE_URL`, a `YOUR-GITHUB-USER` template) counts as
-  "not configured".
+  "not configured". *(v1.8: the default is now the project's own release
+  `onna83/Veil` v1.8, which hosts every TFLite variant.)*
 - **Manual import (offline fallback).** "Import model file(s)…" accepts any
   catalog file: the TFLite variants, the 640m split part zips or the `.onnx`
   files. The file is recognised by its SHA-256.
@@ -471,6 +576,15 @@ scores high on an exposed class.
    - it expires on a scene cut, or after 3 s without a real detection.
 
 ## Inference backend: LiteRT (TFLite), GPU first, CPU fallback
+
+> **v1.8:** the bundled model is `assets/nudenet_320n_p224x480.tflite`
+> (320n weights, FP16, 6.2 MB). Input is `[1,3,480,224]` NCHW; output is
+> `[1,22,2205]` with boxes normalised per axis (x / 224, y / 480). The square
+> 320 file and all other TFLite variants download from
+> `https://github.com/onna83/Veil/releases/download/v1.8/` (the new default
+> host, so no setup is needed). A stored v1.6/v1.7 host URL that still holds
+> the `YOUR-GITHUB-USER` template is replaced by it. The details below describe
+> the v1.1–v1.7 square export.
 
 - **Model.** `320n.pt` was converted on the build machine with Ultralytics
   8.4.182 (`export(format="litert")`, which uses litert-torch) to

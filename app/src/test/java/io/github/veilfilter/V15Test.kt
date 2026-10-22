@@ -136,7 +136,9 @@ class V15Test {
         assertEquals(1280f, ModelSize.captureLong(ModelSize.N640, 4f), 0f)
         assertEquals(8400, ModelSize.N640.anchors); assertEquals(8400, ModelSize.M640.anchors)
         assertTrue(ModelSize.M640.external); assertFalse(ModelSize.M640.tiles); assertTrue(ModelSize.N640.external) // v1.6: downloadable, only 320n@320 is bundled
-        assertFalse(ModelSize.S320.external)
+        // v1.8: the portrait 224x480 is bundled; the square 320 is hosted
+        assertFalse(ModelSize.DEFAULT.external); assertTrue(ModelSize.S320.external)
+        assertEquals(1280f, ModelSize.captureLong(ModelSize.P224, 3f), 0f)
     }
 
     private fun zipOf(name: String, data: ByteArray): ByteArray {

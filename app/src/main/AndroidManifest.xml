@@ -42,10 +42,29 @@
         <activity android:name=".PerformanceActivity" android:exported="false" android:parentActivityName=".MainActivity" />
         <activity android:name=".DebugActivity" android:exported="false" android:parentActivityName=".MainActivity" />
         <activity android:name=".AboutActivity" android:exported="false" android:parentActivityName=".MainActivity" />
+        <activity android:name=".A11yActivity" android:exported="false" android:parentActivityName=".PerformanceActivity" />
 
         <service
             android:name=".CaptureService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
+
+        <!-- v1.8 optional Accessibility mode (off unless the user enables it in
+             Performance > Accessibility mode AND in Android's accessibility settings).
+             Used only for: one touch-through overlay window for all censors, scroll /
+             window-change event timing, and in-memory screenshots of the foreground
+             app window to check what is under Veil's own censors. Reads no text. -->
+        <service
+            android:name=".VeilAccessibilityService"
+            android:exported="false"
+            android:label="@string/a11y_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service" />
+        </service>
     </application>
 </manifest>

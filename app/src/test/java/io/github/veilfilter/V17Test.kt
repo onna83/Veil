@@ -106,7 +106,7 @@ class V17Test {
 
     @Test fun switchableModelsAreOnlyPresentOnes() {
         val ms = FloatingControl.switchableModels(ctx)
-        assertTrue(ModelSize.S320 in ms) // bundled
+        assertTrue(ModelSize.DEFAULT in ms) // bundled
         assertTrue(ms.all { it.available(ctx) })
     }
 

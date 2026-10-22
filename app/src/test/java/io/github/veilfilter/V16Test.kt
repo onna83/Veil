@@ -141,8 +141,8 @@ class V16Test {
     @Test fun catalogIsConsistent() {
         val ids = ModelSize.entries.map { it.id }
         assertEquals(ids.size, ids.toSet().size)
-        // only 320n@320 bundled
-        assertEquals(listOf(ModelSize.S320), ModelSize.entries.filter { it.source == Source.BUNDLED })
+        // v1.8: only the portrait 320n@224x480 is bundled
+        assertEquals(listOf(ModelSize.P224), ModelSize.entries.filter { it.source == Source.BUNDLED })
         for (m in ModelSize.entries.filter { it.external }) {
             assertTrue(m.id, m.sha256.matches(Regex("[0-9a-f]{64}")))
             assertTrue(m.id, m.bytes > 1_000_000)
@@ -158,14 +158,19 @@ class V16Test {
         assertEquals(ModelImporter.M640_SIZE, ModelSize.M640.bytes)
         // anchors match strides 8/16/32
         for (m in ModelSize.entries) {
-            val a = (m.px / 8) * (m.px / 8) + (m.px / 16) * (m.px / 16) + (m.px / 32) * (m.px / 32)
+            val a = (m.w / 8) * (m.h / 8) + (m.w / 16) * (m.h / 16) + (m.w / 32) * (m.h / 32)
+            assertEquals(m.id, maxOf(m.w, m.h), m.px)
+            assertTrue(m.id, m.w % 32 == 0 && m.h % 32 == 0)
             assertEquals(m.id, a, m.anchors)
         }
     }
 
     @Test fun hostedNeedsConfiguredHostUpstreamDoesNot() {
-        assertFalse(ModelSize.hostConfigured(ModelSize.DEFAULT_BASE_URL))
-        assertTrue(ModelSize.M640.urls(ModelSize.DEFAULT_BASE_URL).isEmpty())
+        // v1.8: the default host is the project's own GitHub release
+        assertTrue(ModelSize.hostConfigured(ModelSize.DEFAULT_BASE_URL))
+        assertEquals("https://github.com/onna83/Veil/releases/download/v1.8/nudenet_640m_fp16.tflite", ModelSize.M640.urls(ModelSize.DEFAULT_BASE_URL).single().first)
+        assertFalse(ModelSize.hostConfigured("https://github.com/YOUR-GITHUB-USER/veil-model-host/releases/download/v1"))
+        assertTrue(ModelSize.P256.urls("https://x.example/").single().first.endsWith("/nudenet_320n_p256x544_fp16.tflite"))
         val u = ModelSize.N640.urls("https://github.com/me/veil-models/releases/download/models-v1/")
         assertEquals("https://github.com/me/veil-models/releases/download/models-v1/nudenet_320n_at640.tflite", u.single().first)
         assertFalse(ModelSize.hostConfigured("http://insecure.example/x"))

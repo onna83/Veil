@@ -11,6 +11,8 @@ object AppSettings {
     private const val KEY_BACKEND = "backend"
     private const val KEY_FAST = "fast256" // pre-1.5, migrated to KEY_MODEL
     private const val KEY_MODEL = "model"
+    private const val KEY_A11Y = "a11y_mode"
+    private const val KEY_A11Y_SEEN = "a11y_disclosure_seen"
     private const val KEY_LEAD = "extra_lead_ms"
     private const val KEY_APPEAR = "appearance_guard"
     private const val KEY_SCROLL = "scroll_guard"
@@ -70,7 +72,9 @@ object AppSettings {
     @Volatile var bubbleRight = true; private set
     @Volatile var bubbleYFrac = 0.35f; private set
     @Volatile var backend = "auto"; private set
-    @Volatile var model = ModelSize.S320; private set
+    @Volatile var model = ModelSize.DEFAULT; private set
+    /** v1.8: optional accessibility mode (needs VeilAccessibilityService enabled too) */
+    @Volatile var a11yMode = false; private set
     /** extra scroll prediction, ms (0..60), read live */
     @Volatile var extraLeadMs = 0; private set
     /** pixelation block size, dp on screen, read live */
@@ -97,11 +101,14 @@ object AppSettings {
         backend = p.getString(KEY_BACKEND, "auto") ?: "auto"
         if (Backends.options.none { it.id == backend }) backend = "auto"
         model = ModelSize.byId(p.getString(KEY_MODEL, null))
-            ?: if (p.getBoolean(KEY_FAST, false)) ModelSize.S256 else ModelSize.S320
+            ?: if (p.getBoolean(KEY_FAST, false)) ModelSize.S256 else ModelSize.DEFAULT
         extraLeadMs = p.getInt(KEY_LEAD, 0).coerceIn(0, MAX_LEAD)
         censor = censorFrom { k, d -> p.getBoolean(k, d) }
         pixelDp = p.getInt(KEY_PIXEL, PIXEL_DEFAULT_DP).coerceIn(PIXEL_MIN_DP, PIXEL_MAX_DP)
-        modelBaseUrl = p.getString(KEY_BASE_URL, null)?.takeIf { it.isNotBlank() } ?: ModelSize.DEFAULT_BASE_URL
+        // v1.8: a URL still holding the old placeholder host becomes the real release URL
+        modelBaseUrl = p.getString(KEY_BASE_URL, null)?.takeIf { it.isNotBlank() && !it.contains(ModelSize.HOST_PLACEHOLDER) }
+            ?: ModelSize.DEFAULT_BASE_URL
+        a11yMode = p.getBoolean(KEY_A11Y, false)
         loaded = true
     }
 
@@ -128,7 +135,7 @@ object AppSettings {
     fun ortNnapi(ctx: Context) = prefs(ctx).getBoolean(KEY_NNAPI, false)
     fun setOrtNnapi(ctx: Context, v: Boolean) { prefs(ctx).edit().putBoolean(KEY_NNAPI, v).apply() }
     /** selected model if its file is present, else the bundled default */
-    fun effectiveModel(ctx: Context): ModelSize = if (model.available(ctx)) model else ModelSize.S320
+    fun effectiveModel(ctx: Context): ModelSize = if (model.available(ctx)) model else ModelSize.DEFAULT
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -137,6 +144,10 @@ object AppSettings {
     fun setScrollGuard(ctx: Context, v: Boolean) { scrollGuard = v; prefs(ctx).edit().putBoolean(KEY_SCROLL, v).apply(); changed() }
     fun setGridBoost(ctx: Context, v: Boolean) { gridBoost = v; prefs(ctx).edit().putBoolean(KEY_GRID, v).apply(); changed() }
     fun setDebugHud(ctx: Context, v: Boolean) { debugHud = v; prefs(ctx).edit().putBoolean(KEY_HUD, v).apply(); changed() }
+    /** the accessibility-mode disclosure screen was shown and confirmed */
+    fun a11yDisclosed(ctx: Context) = prefs(ctx).getBoolean(KEY_A11Y_SEEN, false)
+    fun setA11yDisclosed(ctx: Context) { prefs(ctx).edit().putBoolean(KEY_A11Y_SEEN, true).apply() }
+    fun setA11yMode(ctx: Context, v: Boolean) { a11yMode = v; A11yHints.state.active = v && VeilAccessibilityService.instance != null; prefs(ctx).edit().putBoolean(KEY_A11Y, v).apply(); changed() }
     fun setCsvLog(ctx: Context, v: Boolean) { csvLog = v; prefs(ctx).edit().putBoolean(KEY_CSV, v).apply(); changed() }
     fun setBackend(ctx: Context, v: String) { backend = v; prefs(ctx).edit().putString(KEY_BACKEND, v).apply(); changed() }
     const val MAX_LEAD = 60

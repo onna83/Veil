@@ -88,7 +88,7 @@ object ModelManager {
         java.io.File(dir(ctx), "$f.dl").delete()
         errors.remove(f)
         if (!AppSettings.model.available(ctx)) {
-            AppSettings.setModel(ctx, ModelSize.S320)
+            AppSettings.setModel(ctx, ModelSize.DEFAULT)
             CaptureService.switchModel(ctx)
         }
         notifyAll0()

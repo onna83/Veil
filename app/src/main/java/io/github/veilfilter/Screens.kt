@@ -59,7 +59,8 @@ class ModelsActivity : Screen() {
             }
             true
         }
-        val tflite = ModelSize.entries.filter { it.runtime == ModelRuntime.TFLITE }
+        // v1.8: portrait models first (the bundled default leads), then the square ones
+        val tflite = ModelSize.entries.filter { it.runtime == ModelRuntime.TFLITE }.sortedBy { if (it.portrait) 0 else 1 }
         val onnx = ModelSize.entries.filter { it.runtime == ModelRuntime.ONNX }
         Ui.header(content, R.string.models_tflite)
         val c1 = Ui.card(content)
@@ -262,6 +263,32 @@ class PerformanceActivity : Screen() {
         Ui.switchRow(g, R.string.scene_guard, R.string.scene_guard_summary, AppSettings.sceneGuard) { AppSettings.setSceneGuard(this, it) }
         Ui.switchRow(g, R.string.appearance_guard, R.string.appearance_guard_summary, AppSettings.appearanceGuard) { AppSettings.setAppearanceGuard(this, it) }
         Ui.switchRow(g, R.string.scroll_guard, R.string.scroll_guard_summary, AppSettings.scrollGuard) { AppSettings.setScrollGuard(this, it) }
+
+        // v1.8 optional accessibility mode (first switch-on goes through the disclosure screen)
+        Ui.header(content, R.string.sec_a11y)
+        val a = Ui.card(content)
+        a11ySwitch = Ui.switchRow(a, R.string.a11y_mode, R.string.a11y_mode_summary, AppSettings.a11yMode) { on ->
+            if (syncing) return@switchRow
+            if (on && !AppSettings.a11yDisclosed(this)) {
+                syncing = true; a11ySwitch?.toggle?.isChecked = false; syncing = false
+                startActivity(android.content.Intent(this, A11yActivity::class.java))
+            } else AppSettings.setA11yMode(this, on)
+        }
+        a11yStatus = Ui.infoRow(a, R.string.a11y_setup, A11yActivity.statusText(this)) {
+            startActivity(android.content.Intent(this, A11yActivity::class.java))
+        }
+    }
+
+    private var a11ySwitch: Ui.SwitchRow? = null
+    private var a11yStatus: TextView? = null
+    private var syncing = false
+
+    override fun onResume() {
+        super.onResume()
+        syncing = true
+        a11ySwitch?.toggle?.isChecked = AppSettings.a11yMode
+        syncing = false
+        a11yStatus?.text = A11yActivity.statusText(this)
     }
 
     /**
@@ -345,6 +372,59 @@ class AboutActivity : Screen() {
         Ui.header(content, R.string.about_good_to_know)
         val g = Ui.card(content)
         Ui.infoRow(g, R.string.about_capture, getString(R.string.about_capture_text))
+        Ui.infoRow(g, R.string.about_v18, getString(R.string.about_v18_text))
         Ui.infoRow(g, R.string.about_limits, getString(R.string.about_limits_text))
+    }
+}
+
+// ============================================================================ Accessibility mode (v1.8)
+
+/** Disclosure + switch + Android-setting status for the optional accessibility mode. */
+class A11yActivity : Screen() {
+    override val titleRes = R.string.a11y_mode
+    private var sw: Ui.SwitchRow? = null
+    private var status: TextView? = null
+    private var syncing = false
+
+    override fun build() {
+        Ui.header(content, R.string.a11y_what_header)
+        val d = Ui.card(content)
+        Ui.infoRow(d, R.string.a11y_uses, getString(R.string.a11y_uses_text))
+        Ui.infoRow(d, R.string.a11y_never, getString(R.string.a11y_never_text))
+        Ui.infoRow(d, R.string.a11y_shots, getString(R.string.a11y_shots_text))
+        Ui.header(content, R.string.a11y_setup)
+        val c = Ui.card(content)
+        sw = Ui.switchRow(c, R.string.a11y_use, R.string.a11y_use_summary, AppSettings.a11yMode) { on ->
+            if (syncing) return@switchRow
+            if (on) AppSettings.setA11yDisclosed(this)
+            AppSettings.setA11yMode(this, on)
+            refresh()
+        }
+        status = Ui.infoRow(c, R.string.a11y_service, statusText(this)) {
+            try {
+                startActivity(android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            } catch (_: Exception) { Toast.makeText(this, R.string.a11y_no_settings, Toast.LENGTH_SHORT).show() }
+        }
+        Ui.note(content, getString(R.string.a11y_note))
+    }
+
+    private fun refresh() {
+        syncing = true; sw?.toggle?.isChecked = AppSettings.a11yMode; syncing = false
+        status?.text = statusText(this)
+    }
+
+    override fun onResume() { super.onResume(); refresh() }
+
+    companion object {
+        fun statusText(ctx: android.content.Context): String {
+            val enabled = VeilAccessibilityService.enabledInSettings(ctx)
+            val running = VeilAccessibilityService.instance != null
+            return ctx.getString(when {
+                !AppSettings.a11yMode -> if (enabled) R.string.a11y_status_off_enabled else R.string.a11y_status_off
+                running -> R.string.a11y_status_active
+                enabled -> R.string.a11y_status_starting
+                else -> R.string.a11y_status_needs_setting
+            })
+        }
     }
 }

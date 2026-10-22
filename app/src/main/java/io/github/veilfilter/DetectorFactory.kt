@@ -48,7 +48,7 @@ object DetectorFactory {
 
     /** Median ms of [runs] inferences after [warm] warm-up runs. */
     fun time(d: Detector, warm: Int, runs: Int): DoubleArray {
-        val input = FloatArray(3 * d.inputSize * d.inputSize) { ((it * 31) % 255) / 255f }
+        val input = FloatArray(3 * d.inW * d.inH) { ((it * 31) % 255) / 255f }
         repeat(warm) { d.run(input) }
         val t = DoubleArray(runs)
         for (i in 0 until runs) {

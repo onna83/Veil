@@ -17,12 +17,14 @@ class OrtDetector private constructor(
     override val backend: String,
     model: ModelSize,
 ) : Detector {
-    override val inputSize = model.px
+    override val inW = model.w
+    override val inH = model.h
     override val numAnchors = model.anchors
-    override val coordScale = 1f
+    override val coordScaleX = 1f
+    override val coordScaleY = 1f
     private val inName = session.inputNames.first()
-    private val shape = longArrayOf(1, 3, inputSize.toLong(), inputSize.toLong())
-    private val buf: FloatBuffer = java.nio.ByteBuffer.allocateDirect(4 * 3 * inputSize * inputSize)
+    private val shape = longArrayOf(1, 3, inH.toLong(), inW.toLong())
+    private val buf: FloatBuffer = java.nio.ByteBuffer.allocateDirect(4 * 3 * inW * inH)
         .order(java.nio.ByteOrder.nativeOrder()).asFloatBuffer()
     private val out = FloatArray(22 * numAnchors)
 
@@ -58,7 +60,7 @@ class OrtDetector private constructor(
                 try {
                     val s = env.createSession(f.absolutePath, opts(true))
                     val d = OrtDetector(s, env, "ORT-NNAPI ${model.id}", model)
-                    d.run(FloatArray(3 * model.px * model.px))
+                    d.run(FloatArray(3 * model.w * model.h))
                     return d
                 } catch (t: Throwable) {
                     android.util.Log.w("VeilOrt", "NNAPI failed, using CPU", t)
@@ -66,7 +68,7 @@ class OrtDetector private constructor(
             }
             val s = env.createSession(f.absolutePath, opts(false))
             val d = OrtDetector(s, env, "ORT-CPU x$threads ${model.id}", model)
-            d.run(FloatArray(3 * model.px * model.px))
+            d.run(FloatArray(3 * model.w * model.h))
             return d
         }
     }

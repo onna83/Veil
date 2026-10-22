@@ -43,7 +43,7 @@ class CaptureService : Service() {
     private var thread: HandlerThread? = null
     private var worker: Handler? = null
     @Volatile private var pipeline: Pipeline? = null
-    private var activeModel = ModelSize.S320
+    private var activeModel = ModelSize.DEFAULT
     private var probeRef: CaptureProbe? = null
     private var socInfo = ""
     private var vsyncMs = 16.6f
@@ -51,7 +51,11 @@ class CaptureService : Service() {
     private val main = Handler(Looper.getMainLooper())
     private var floating: FloatingControl? = null
     /** AppSettings changed (UI thread): bubble on/off, HUD on/off, menu labels */
-    private val settingsListener: () -> Unit = { main.post { syncUi() } }
+    private val settingsListener: () -> Unit = { main.post { syncUi(); syncA11y() } }
+    /** v1.8: accessibility service connected / disconnected */
+    private val a11yListener: () -> Unit = { main.post { syncA11y() } }
+    /** captured content on screen (px), snapshot for the capture thread */
+    @Volatile private var contentSnap = Rect()
     private var windowCtx: Context? = null
 
     /** Size of the captured content reported by onCapturedContentResize (px), or 0. */
@@ -169,7 +173,9 @@ class CaptureService : Service() {
         ServiceState.paused = false
         ServiceState.set(true)
         AppSettings.addListener(settingsListener)
+        VeilAccessibilityService.addListener(a11yListener)
         syncUi()
+        syncA11y()
         if (AppSettings.debugHud) r.showHud("Veil: starting… (${Backends.RUNTIME})")
     }
 
@@ -213,6 +219,36 @@ class CaptureService : Service() {
         if (!AppSettings.debugHud) renderer?.showHud(null)
     }
 
+    // ---- v1.8 accessibility mode (main thread) ----
+
+    /** Mode on + service connected: one accessibility overlay, hints, clean-frame checks. Else per-box windows. */
+    private fun syncA11y() {
+        if (stopping || projection == null) return
+        val svc = VeilAccessibilityService.instance
+        val on = AppSettings.a11yMode && svc != null
+        A11yHints.state.active = on
+        val r = renderer ?: return
+        if (on && !r.sheetActive) {
+            if (!r.attachSheet(svc!!)) Log.w(TAG, "accessibility overlay unavailable, keeping per-box windows")
+        } else if (!on && r.sheetActive) r.detachSheet()
+        applyA11y(pipeline)
+    }
+
+    private fun applyA11y(p: Pipeline?) {
+        p ?: return
+        val on = AppSettings.a11yMode && VeilAccessibilityService.instance != null
+        p.a11yMode = on
+        p.cleanShotRequester = if (on) { w, h -> requestClean(p, w, h) } else null
+    }
+
+    /** capture thread: overlay-free screenshot of the foreground app window -> p.onCleanFrame (capture thread) */
+    private fun requestClean(p: Pipeline, w: Int, h: Int) {
+        val svc = VeilAccessibilityService.instance
+        val wk = worker
+        if (svc == null || wk == null) { wk?.post { p.onCleanFrame(null) }; return }
+        svc.requestCleanShot(contentSnap, w, h) { shot -> wk.post { p.onCleanFrame(shot) } }
+    }
+
     /** Pause / resume censoring. The pipeline keeps running; only what is shown changes, instantly. */
     private fun setPaused(v: Boolean) {
         if (ServiceState.paused == v) return
@@ -241,6 +277,7 @@ class CaptureService : Service() {
         )
         p.vsyncMs = vsyncMs
         applyLive(p)
+        applyA11y(p)
         return p
     }
 
@@ -323,6 +360,7 @@ class CaptureService : Service() {
             rect.set(db.centerX() - w / 2, db.centerY() - h / 2, db.centerX() - w / 2 + w, db.centerY() - h / 2 + h)
         }
         screenW = rect.width()
+        contentSnap = Rect(rect)
         renderer?.let {
             it.contentRect.set(rect)
             it.frameW = capW
@@ -371,6 +409,7 @@ class CaptureService : Service() {
             }
         }
         reconfigure()
+        renderer?.resizeSheet()
         floating?.onDisplayChanged()
     }
 
@@ -383,6 +422,8 @@ class CaptureService : Service() {
         if (stopping) return
         stopping = true
         AppSettings.removeListener(settingsListener)
+        VeilAccessibilityService.removeListener(a11yListener)
+        A11yHints.state.active = false
         floating?.hide(); floating = null
         ServiceState.paused = false
         ServiceState.set(false)

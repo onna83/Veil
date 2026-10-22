@@ -181,7 +181,7 @@ class ScreensTest {
             val b = backdrop(); val c = Canvas(b)
             place(c, BubbleView(a), bx, by, size, size)
             val m = QuickMenuView(a) {}
-            m.showModels(listOf(ModelSize.S320, ModelSize.entries[1], ModelSize.entries[2]), ModelSize.S320)
+            m.showModels(listOf(ModelSize.DEFAULT, ModelSize.entries[1], ModelSize.entries[2]), ModelSize.DEFAULT)
             m.measure(View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.AT_MOST), View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.AT_MOST))
             place(c, m, bx - m.measuredWidth - (8 * d).toInt(), by + size / 2 - m.measuredHeight / 2)
             save(b, "09_bubble_models")

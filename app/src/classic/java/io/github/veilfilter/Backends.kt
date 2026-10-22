@@ -32,10 +32,13 @@ object Backends {
         override val backend: String,
         model: ModelSize,
     ) : Detector {
-        override val inputSize = model.px
+        override val inW = model.w
+        override val inH = model.h
         override val numAnchors = model.anchors
-        override val coordScale = model.px.toFloat() // normalised boxes
-        private val inBuf = ByteBuffer.allocateDirect(4 * 3 * inputSize * inputSize).order(ByteOrder.nativeOrder())
+        // normalised boxes: x / inW, y / inH
+        override val coordScaleX = model.w.toFloat()
+        override val coordScaleY = model.h.toFloat()
+        private val inBuf = ByteBuffer.allocateDirect(4 * 3 * inW * inH).order(ByteOrder.nativeOrder())
         private val inF: FloatBuffer = inBuf.asFloatBuffer()
         private val outBuf = ByteBuffer.allocateDirect(4 * 22 * numAnchors).order(ByteOrder.nativeOrder())
         private val outF: FloatBuffer = outBuf.asFloatBuffer()
@@ -74,7 +77,7 @@ object Backends {
         val opts = GpuDelegateFactory.Options()
             .setPrecisionLossAllowed(true)
             .setInferencePreference(GpuDelegateFactory.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED)
-            .setSerializationParams(ctx.codeCacheDir.absolutePath, "nudenet_${model.id}_${force ?: "auto"}_v15")
+            .setSerializationParams(ctx.codeCacheDir.absolutePath, "nudenet_${model.id}_${force ?: "auto"}_v18")
         if (force != null) opts.setForceBackend(force)
         val delegate = GpuDelegate(opts)
         try {
@@ -85,7 +88,7 @@ object Backends {
                 else -> "GPU"
             }
             val d = Tfl(interp, delegate, "$name LiteRT1 ${model.id}", model)
-            d.run(FloatArray(3 * model.px * model.px))
+            d.run(FloatArray(3 * model.w * model.h))
             return d
         } catch (t: Throwable) {
             delegate.close()
@@ -97,7 +100,7 @@ object Backends {
         val n = cpuThreads()
         val interp = Interpreter(buf, Interpreter.Options().setNumThreads(n).setUseXNNPACK(true))
         val d = Tfl(interp, null, "CPU-XNNPACK x$n ${model.id}", model)
-        d.run(FloatArray(3 * model.px * model.px))
+        d.run(FloatArray(3 * model.w * model.h))
         return d
     }
 

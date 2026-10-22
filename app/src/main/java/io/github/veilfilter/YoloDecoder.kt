@@ -62,6 +62,25 @@ class YoloDecoder(
         iouThreshold: Float,
         maxX: Float,
         maxY: Float,
+        veto: BooleanArray? = null,
+    ): Int = decodeXY(
+        out, coordScale * outScale, coordScale * outScale, threshold, classMask, classAware, iouThreshold, maxX, maxY, veto,
+    )
+
+    /**
+     * v1.8: separate x / y factors (non-square inputs: normalised boxes are
+     * x / inW and y / inH). Results are in units of [fx] / [fy].
+     */
+    fun decodeXY(
+        out: FloatArray,
+        fx: Float,
+        fy: Float,
+        threshold: Float,
+        classMask: BooleanArray,
+        classAware: Boolean,
+        iouThreshold: Float,
+        maxX: Float,
+        maxY: Float,
         /**
          * Disabled classes that veto an anchor: if one of them scores at least
          * [VETO_RATIO] x the best enabled class there, the anchor is that (disabled)
@@ -96,11 +115,10 @@ class YoloDecoder(
                 if (best <= cScore[minIdx]) continue
                 slot = minIdx
             }
-            val f = coordScale * outScale
-            val bx = out[i] * f
-            val by = out[n + i] * f
-            val bw = out[2 * n + i] * f
-            val bh = out[3 * n + i] * f
+            val bx = out[i] * fx
+            val by = out[n + i] * fy
+            val bw = out[2 * n + i] * fx
+            val bh = out[3 * n + i] * fy
             cx1[slot] = clamp(bx - bw * 0.5f, 0f, maxX)
             cy1[slot] = clamp(by - bh * 0.5f, 0f, maxY)
             cx2[slot] = clamp(bx + bw * 0.5f, 0f, maxX)

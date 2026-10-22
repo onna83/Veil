@@ -32,7 +32,7 @@
     <string name="more">More</string>
     <string name="nav_models">Detection model</string>
     <string name="nav_perf">Performance</string>
-    <string name="nav_perf_summary">Backend, speed, guards</string>
+    <string name="nav_perf_summary">Backend, speed, guards, accessibility mode</string>
     <string name="nav_debug">Debug</string>
     <string name="nav_debug_summary">HUD and timing log</string>
     <string name="nav_about">About</string>
@@ -134,4 +134,32 @@
     <string name="notif_title">Veil is filtering</string>
     <string name="notif_text">Tap Stop to end protection</string>
     <string name="notif_paused">Paused. Tap the bubble to resume.</string>
+
+    <!-- v1.8 accessibility mode -->
+    <string name="sec_a11y">Accessibility mode</string>
+    <string name="a11y_mode">Accessibility mode</string>
+    <string name="a11y_mode_summary">Optional. One touch-through overlay for all censors, scroll hints, and checks under Veil’s own censors</string>
+    <string name="a11y_setup">Setup and status</string>
+    <string name="a11y_what_header">What it does</string>
+    <string name="a11y_uses">Uses</string>
+    <string name="a11y_uses_text">• One full-screen, touch-through accessibility overlay that draws every censor (smoother than one window per censor).\n• The timing of “scrolled” and “window changed” events, so censors keep moving through a scroll and boxes from a previous screen are dropped quickly.\n• The position and size of the app window on top, to know which window to check.</string>
+    <string name="a11y_never">Never</string>
+    <string name="a11y_never_text">Veil does not read text, buttons, view names or anything you type, does not perform actions for you, and sends nothing anywhere.</string>
+    <string name="a11y_shots">Window snapshots (Android 14+)</string>
+    <string name="a11y_shots_text">While a censor is covering something, Veil occasionally (at most twice a second) takes a snapshot of the app window underneath, which does not include Veil’s overlay, to check whether the content is still there. Snapshots stay in memory, are scaled down to the detector size and are never saved or sent.</string>
+    <string name="a11y_use">Use accessibility mode</string>
+    <string name="a11y_use_summary">I have read the above</string>
+    <string name="a11y_service">Android setting</string>
+    <string name="a11y_no_settings">Accessibility settings are not available</string>
+    <string name="a11y_note">Android asks you to switch on “Veil” under Settings › Accessibility › Installed apps. With the mode off, or the setting off, Veil works as before with its own overlay windows. You can switch either off at any time.</string>
+    <string name="a11y_status_off">Off</string>
+    <string name="a11y_status_off_enabled">Off in Veil (the Android setting is on; you can switch it off too)</string>
+    <string name="a11y_status_active">Active</string>
+    <string name="a11y_status_starting">Android setting on, connecting…</string>
+    <string name="a11y_status_needs_setting">Needs the Android setting: tap to open Accessibility settings</string>
+    <string name="a11y_service_label">Veil accessibility mode</string>
+    <string name="a11y_service_summary">One overlay for all censors, scroll hints, and checks under Veil’s censors</string>
+    <string name="a11y_service_description">Optional mode of Veil (off unless you also switch it on in the app). Veil uses: one touch-through overlay window that draws its censors; the timing of scroll and window-change events; the bounds of the top app window; and, on Android 14+, occasional in-memory snapshots of that window to check what is under Veil’s own censors. Veil never reads text or view content, never performs actions, and nothing leaves the phone.</string>
+    <string name="about_v18">New in 1.8</string>
+    <string name="about_v18_text">Portrait model input (224×480: 1.5× the resolution of 320×320 on a phone screen at about the same cost), landscape folded into it, a smoother prediction horizon, and an optional accessibility mode. Extra GPU models download from the Veil GitHub release.</string>
 </resources>

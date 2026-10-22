@@ -37,7 +37,7 @@ class Pipeline(
 ) {
     // ---------------- capture-thread state ----------------
     private val decoderAnchors = model.anchors
-    private val tracker = Tracker()
+    private val tracker = Tracker(maxExtrapolateMs = model.predictCapMs)
     private val guard = SceneGuard()
     private val shift = ShiftEstimator()
     private val appear = AppearanceGuard()
@@ -64,6 +64,39 @@ class Pipeline(
     private var lastDy = 0f
     private var scrolling = false
     private var lastScrollT = Long.MIN_VALUE / 2
+
+    // ---- v1.8 accessibility mode (hints + clean-frame verification) ----
+    /** accessibility mode on AND the service connected (set by CaptureService) */
+    @Volatile var a11yMode = false
+    private val hints = A11yHints.state
+    private var hintScroll = false
+    private var seenContentSeq = 0
+    /** tracks that existed when the app reported a different screen */
+    private val staleIds = HashSet<Int>()
+    private var staleAfterT = 0L
+    /**
+     * Requests an overlay-free screenshot of the foreground app window, scaled to
+     * (w, h) capture coordinates; the result must be posted to [onCleanFrame] on
+     * the capture thread (null on failure). Set by CaptureService (Android 14+,
+     * accessibility mode).
+     */
+    @Volatile var cleanShotRequester: ((w: Int, h: Int) -> Unit)? = null
+    private var verifyPending = false
+    private var verifyReqT = Long.MIN_VALUE / 2
+    private var verifyReqCumX = 0.0
+    private var verifyReqCumY = 0.0
+    private var verifyAt = Long.MAX_VALUE
+    private var verifyStrict = false
+    private var verifyCount = 0
+    private var verifyDrops = 0
+    private var verifyFails = 0
+    /** the last clean frame (in memory only) while the page has not moved since */
+    private var cleanBytes: ByteArray? = null
+    private var cleanStride = 0
+    private var cleanCumX = 0.0
+    private var cleanCumY = 0.0
+    private var cleanWin: android.graphics.RectF? = null
+    private var fullLay: InputLayout? = null
 
     // what the detector has already seen
     private var lastDetCumX = 0.0
@@ -104,8 +137,12 @@ class Pipeline(
     @Volatile var blockPx = 16f
 
     // ---------------- inference hand-off ----------------
-    private class Slot(size: Int) {
-        val pre = Preprocessor(size, nchw = true)
+    private class Slot(w: Int, h: Int) {
+        val pre = Preprocessor(w, h, nchw = true)
+        /** v1.8: an overlay-free verification frame (accessibility screenshot) */
+        var clean = false
+        var strict = false
+        var cleanWin: android.graphics.RectF? = null
         var state = FREE
         var frameId = 0L
         var tCap = 0L
@@ -122,7 +159,7 @@ class Pipeline(
     }
 
     private val lock = Object()
-    private val slots = arrayOf(Slot(model.px), Slot(model.px))
+    private val slots = arrayOf(Slot(model.w, model.h), Slot(model.w, model.h))
     @Volatile private var running = false
     private var inferThread: Thread? = null
     // inference thread only
@@ -141,6 +178,8 @@ class Pipeline(
         var region = -1
         var rx = 0; var ry = 0; var rw = 0; var rh = 0
         val clipped = BooleanArray(n)
+        val part = IntArray(n)
+        var clean = false; var strict = false; var cleanWin: android.graphics.RectF? = null
     }
 
     // ---------------- metrics ----------------
@@ -196,7 +235,8 @@ class Pipeline(
         pendingCut = false
         haveDet = false
         gvx = 0f; gvy = 0f
-        synchronized(lock) { for (s in slots) if (s.state == READY) s.state = FREE }
+        staleIds.clear(); verifyAt = Long.MAX_VALUE; cleanBytes = null; fullLay = null
+        synchronized(lock) { for (s in slots) if (s.state == READY) { s.state = FREE; s.clean = false } }
         renderer.submit(RenderState(fw, fh, emptyList(), nowMs(), System.nanoTime()))
     }
 
@@ -239,6 +279,10 @@ class Pipeline(
         val t0 = System.nanoTime()
         frameId++
         val w = fw; val h = fh
+        // v1.8 accessibility hints (no-ops while the mode is off)
+        hintScroll = a11yMode && hints.scrolling(tCap)
+        renderer.scrollActive = hintScroll
+        if (a11yMode) onContentHint(tCap)
         val interval = if (lastCap > 0) (tCap - lastCap).toFloat() else 0f
         lastCap = tCap
         val mode = probe.mode
@@ -288,13 +332,16 @@ class Pipeline(
             } else { gvx = 0f; gvy = 0f }
             if (shift.static) { gvx = 0f; gvy = 0f }
         } else {
-            gvx *= 0.5f; gvy *= 0.5f
+            // v1.8: while the app itself reports scrolling, an unsure estimate is not "stopped"
+            val d = if (hintScroll) 0.9f else 0.5f
+            gvx *= d; gvy *= d
         }
         if (abs(gvx) < 0.005f) gvx = 0f
         if (abs(gvy) < 0.005f) gvy = 0f
         lastDx = dx; lastDy = dy
         scrolling = shift.confident && !shift.static && (abs(dx) >= 0.5f || abs(dy) >= 0.5f)
-        if (scrolling) lastScrollT = tCap
+        if (scrolling || hintScroll) lastScrollT = tCap
+        if ((dx != 0f || dy != 0f) && cleanBytes != null) cleanBytes = null // clean pixels no longer line up
         // no pre-emptive covering while scrolling (or just after): only real
         // detections + scroll-compensated tracks cover content then
         val recentScroll = tCap - lastScrollT < SCROLL_QUIET_MS
@@ -303,8 +350,9 @@ class Pipeline(
         val t2 = System.nanoTime()
         val cutRaw = guard.analyze(frame, w, h, stride, excl, nExcl)
         val cfg = censor
-        val cut = CutGate.fire(sceneGuardEnabled && cfg.any, cutRaw, scrolling, tCap, lastScrollT)
-        if (scrolling) cutGuard = null // never hold a full-screen cover while the user scrolls
+        // (an app-reported scroll is never a cut either; a different screen is a content hint instead)
+        val cut = CutGate.fire(sceneGuardEnabled && cfg.any, cutRaw, scrolling || hintScroll, tCap, lastScrollT)
+        if (scrolling || hintScroll) cutGuard = null // never hold a full-screen cover while the user scrolls
         if (cut) {
             cutGuard = buildGuardBox(tCap)
             cutGuardFrame = frameId
@@ -327,7 +375,7 @@ class Pipeline(
             )
             mAppear.add(appear.lastMs)
             if (gridBoostEnabled) {
-                tiles.layout(w, h)
+                tiles.layout(w, h, model.h.toFloat() / model.w)
                 tiles.observe(appear.skin, appear.cols, appear.rows, appear.cell, cumX, cumY, tCap)
             }
         } else if (appear.boxes.isNotEmpty()) appear.reset()
@@ -354,7 +402,8 @@ class Pipeline(
             if (selfVisible) {
                 val d = renderer.drawnFor(tr.id)
                 if (d != null) {
-                    val occ = if (mode == CaptureProbe.Mode.FULL_SCREEN) {
+                    // (the accessibility overlay's capture latency is not probed: check colours there)
+                    val occ = if (mode == CaptureProbe.Mode.FULL_SCREEN && !renderer.sheetActive) {
                         // our censor is in this frame once it has been up longer than the capture latency
                         tCap - d.firstShownMs > probeLat + vsyncMs
                     } else {
@@ -375,6 +424,8 @@ class Pipeline(
             }
         }
         for (tr in toRemove) tracker.remove(tr)
+        // 5b. v1.8: verify what is under our own censors with an overlay-free screenshot
+        maybeVerify(tCap, selfVisible)
 
         // 6. publish (censors follow the content at capture rate)
         val tp = System.nanoTime()
@@ -421,8 +472,100 @@ class Pipeline(
         // the probe can be fooled by dark content before single-app is confirmed; only trust it in full screen
         val l = probeLatency()
         val toScreen = if (l > 0) max(l, vsyncMs) else 2 * vsyncMs
-        renderer.leadMs = min(toScreen + 0.5f * vsyncMs + extraLeadMs, 100f)
+        val lead = min(toScreen + 0.5f * vsyncMs + extraLeadMs, 100f)
+        renderer.leadMs = lead
         renderer.vsyncMs = vsyncMs
+        // v1.8 horizon: exact lead up to the knee, then a bounded tail (see Prediction)
+        val cap = model.predictCapMs.toFloat()
+        renderer.capMs = cap
+        renderer.kneeMs = Prediction.knee(mDeliver.v, mAnalyze.v, renderer.hopMsEma, lead, mInterval.v, vsyncMs, cap)
+    }
+
+    /** the full-frame model input layout for the current capture size */
+    private fun fullLayout(): InputLayout {
+        val l = fullLay
+        if (l != null) return l
+        return InputLayout.choose(fw, fh, model.w, model.h).also { fullLay = it }
+    }
+
+    /** v1.8: the app reported a different screen -> boxes of the old one must be re-confirmed */
+    private fun onContentHint(tCap: Long) {
+        val seq = hints.contentSeq
+        if (seq == seenContentSeq) return
+        seenContentSeq = seq
+        if (tracker.tracks.isEmpty()) return
+        staleIds.clear()
+        for (tr in tracker.tracks) staleIds.add(tr.id)
+        // judge on frames captured after the transition had time to draw
+        staleAfterT = max(hints.lastContentMs, tCap) + CONTENT_SETTLE_MS
+        tiles.requestFull()
+        verifyAt = staleAfterT
+        verifyStrict = true
+    }
+
+    private fun maybeVerify(tCap: Long, selfVisible: Boolean) {
+        val req = cleanShotRequester ?: return
+        if (!a11yMode || !selfVisible || verifyPending || fw <= 0) return
+        var anyOcc = false
+        for (tr in tracker.tracks) if (tr.isOccluded(tCap, tracker.occludedGraceMs)) { anyOcc = true; break }
+        if (!anyOcc) { if (tCap >= verifyAt) { verifyAt = Long.MAX_VALUE; verifyStrict = false }; return }
+        val due = tCap >= verifyAt || (tCap - verifyReqT >= VERIFY_INTERVAL_MS && !scrolling && !hintScroll)
+        if (!due) return
+        verifyPending = true
+        verifyReqT = tCap; verifyReqCumX = cumX; verifyReqCumY = cumY
+        if (tCap >= verifyAt) verifyAt = Long.MAX_VALUE
+        req(fw, fh)
+    }
+
+    /**
+     * Capture thread: an overlay-free screenshot of the foreground app window
+     * (accessibility mode, Android 14+), already scaled to capture coordinates.
+     * Refreshes the pixels shown in occluded censors and runs one full detector
+     * pass on it; tracks under our censors that it does not find are retired.
+     * Never stored: the bytes live until the page moves or the next shot.
+     */
+    fun onCleanFrame(shot: VeilAccessibilityService.CleanShot?) {
+        verifyPending = false
+        if (shot == null) { verifyFails++; return }
+        if (shot.w != fw || shot.h != fh || paused) return
+        // the page moved since the request: the shot no longer lines up
+        if (abs(cumX - verifyReqCumX) > 1.0 || abs(cumY - verifyReqCumY) > 1.0) return
+        cleanBytes = shot.bytes; cleanStride = shot.stride; cleanCumX = cumX; cleanCumY = cumY; cleanWin = shot.window
+        val slot: Slot = synchronized(lock) {
+            val sl = slots.firstOrNull { it.state == FREE }
+                ?: slots.firstOrNull { it.state == READY && !it.cut && !it.clean }
+                ?: return
+            sl.state = WRITING
+            sl
+        }
+        slot.pre.process(shot.bytes, shot.stride, fullLayout())
+        slot.region = -1; slot.rx = 0; slot.ry = 0; slot.rw = fw; slot.rh = fh
+        slot.frameId = frameId; slot.tCap = verifyReqT; slot.cumX = verifyReqCumX; slot.cumY = verifyReqCumY
+        slot.gen = generation; slot.w = fw; slot.h = fh
+        slot.cut = false
+        slot.clean = true; slot.strict = verifyStrict; slot.cleanWin = shot.window
+        verifyStrict = false
+        slot.readyNs = System.nanoTime()
+        synchronized(lock) { slot.state = READY; lock.notifyAll() }
+    }
+
+    private fun onCleanDetections(r: DetResult, now: Long) {
+        // tracks under our censors when the shot was requested
+        val occ = ArrayList<Tracker.Track>()
+        for (tr in tracker.tracks) if (tr.isOccluded(now, tracker.occludedGraceMs)) occ.add(tr)
+        tracker.update(r.count, r.x1, r.y1, r.x2, r.y2, r.score, r.cls, now, false, measT = r.tCap)
+        val win = r.cleanWin
+        val limit = if (r.strict) 1 else VERIFY_MISSES
+        for (tr in occ) {
+            if (tr !in tracker.tracks) continue
+            if (tr.confirmedAt == now) { tr.verifyMiss = 0; continue }
+            val cx = (tr.x1 + tr.x2) * 0.5f; val cy = (tr.y1 + tr.y2) * 0.5f
+            if (win != null && !win.contains(cx, cy)) continue
+            tr.verifyMiss++
+            if (tr.verifyMiss >= limit) { tracker.remove(tr); verifyDrops++ }
+        }
+        verifyCount++
+        publish(now, null)
     }
 
     /** Preprocess into a free slot; the inference thread takes the newest. */
@@ -430,20 +573,21 @@ class Pipeline(
         val slot: Slot = synchronized(lock) {
             // a READY cut frame must not be overwritten (it is the clean frame the guard waits for)
             val sl = slots.firstOrNull { it.state == FREE }
-                ?: slots.firstOrNull { it.state == READY && !it.cut }
+                ?: slots.firstOrNull { it.state == READY && !it.cut && !it.clean }
                 ?: return
             sl.state = WRITING
             sl
         }
+        slot.clean = false; slot.strict = false; slot.cleanWin = null
         if (pendingCut) tiles.requestFull()
         val region = if (gridBoostEnabled) tiles.peek(tCap) else -1
         val tl = if (region >= 0) tiles.tiles.getOrNull(region) else null
         if (tl != null) {
-            slot.region = region; slot.rx = tl.x; slot.ry = tl.y; slot.rw = tl.side; slot.rh = tl.side
-            slot.pre.process(frame, tl.side, tl.side, stride, tl.y * stride + tl.x * 4)
+            slot.region = region; slot.rx = tl.x; slot.ry = tl.y; slot.rw = tl.w; slot.rh = tl.h
+            slot.pre.process(frame, stride, InputLayout.fit(tl.x, tl.y, tl.w, tl.h, model.w, model.h))
         } else {
             slot.region = -1; slot.rx = 0; slot.ry = 0; slot.rw = fw; slot.rh = fh
-            slot.pre.process(frame, fw, fh, stride)
+            slot.pre.process(frame, stride, fullLayout())
         }
         slot.frameId = frameId; slot.tCap = tCap; slot.cumX = cumX; slot.cumY = cumY
         slot.gen = generation; slot.w = fw; slot.h = fh
@@ -483,12 +627,23 @@ class Pipeline(
             kept++
         }
         r.count = kept
+        if (r.clean) { onCleanDetections(r, now); return }
         val tile = r.region >= 0
         tracker.update(
             r.count, r.x1, r.y1, r.x2, r.y2, r.score, r.cls, now, r.cut && !tile,
             clipped = if (tile) r.clipped else null, keepMs = if (tile) TILE_KEEP_MS else 0L,
             measT = r.tCap,
         )
+        if (!tile && staleIds.isNotEmpty() && r.tCap >= staleAfterT) {
+            // v1.8 content hint: boxes of the previous screen that this pass did not find
+            // again go now (occluded ones are checked by the strict verification shot)
+            toRemove.clear()
+            for (tr in tracker.tracks) {
+                if (tr.id in staleIds && tr.confirmedAt != now && !tr.isOccluded(now, tracker.occludedGraceMs)) toRemove.add(tr)
+            }
+            for (tr in toRemove) tracker.remove(tr)
+            staleIds.clear()
+        }
         if (!tile) {
             var big = false
             for (i in 0 until r.count) if ((r.x2[i] - r.x1[i]) * (r.y2[i] - r.y1[i]) > 0.02f * w * h && r.score[i] >= 0.3f) big = true
@@ -537,6 +692,8 @@ class Pipeline(
      * captured and hide the new content from the detector.
      */
     private fun buildScrollGuard(tCap: Long, mode: CaptureProbe.Mode, interval: Float): CensorBox? {
+        // accessibility mode: never pre-emptively censor during scrolls (only real detections)
+        if (a11yMode) return null
         if (!scrollGuardEnabled || mode != CaptureProbe.Mode.SINGLE_APP || !haveDet) return null
         val pendX = (cumX - lastDetCumX).toFloat()
         val pendY = (cumY - lastDetCumY).toFloat()
@@ -632,6 +789,17 @@ class Pipeline(
                 // The capture shows our own censor here: keep the last clean pixels
                 // (they move with the page); if we never had any, solid dark.
                 if (p == null) { p = Pix(1, 1, null); pix[tr.id] = p }
+                val cb = cleanBytes
+                val win = cleanWin
+                if (cb != null && win != null && win.contains(x1, y1) && win.contains(x2 - 0.5f, y2 - 0.5f) &&
+                    abs(cumX - cleanCumX) < 1.0 && abs(cumY - cleanCumY) < 1.0) {
+                    // v1.8: the overlay-free screenshot shows what is under our censor now
+                    val cols = Pixelator.blocksOf(x2 - x1, bpx)
+                    val rows = Pixelator.blocksOf(y2 - y1, bpx)
+                    val c = IntArray(cols * rows)
+                    Pixelator.sampleBlocks(cb, fw, fh, cleanStride, x1, y1, x2, y2, cols, rows, c)
+                    p.cols = cols; p.rows = rows; p.colors = c; p.gx = gix; p.gy = giy
+                }
                 colors = p.colors
             } else {
                 val cols = Pixelator.blocksOf(x2 - x1, bpx)
@@ -696,20 +864,21 @@ class Pipeline(
         }
         backendName = det.backend
         val decoder = YoloDecoder(numAnchors = decoderAnchors)
+        val box4 = FloatArray(4)
         try {
             while (running) {
                 val slot = synchronized(lock) {
                     var s: Slot? = null
                     while (running) {
                         s = null
-                        for (c in slots) if (c.state == READY && (s == null || c.frameId > s.frameId || c.cut)) s = c
+                        for (c in slots) if (c.state == READY && (s == null || c.frameId > s.frameId || c.cut || c.clean)) s = c
                         if (s != null) {
                             // Fresh-frame wait: if the newest frame is already old (> 1/3 of a
                             // capture interval) and the next one is due soon, wait for it. On
                             // average this lowers detection age by ~1/3 interval (see README).
                             val iv = capIntervalShared
                             val cand = s
-                            if (freshWaitEnabled && !cand.cut && waitedFor != cand.frameId) {
+                            if (freshWaitEnabled && !cand.cut && !cand.clean && waitedFor != cand.frameId) {
                                 val waitMs = FreshWait.timeoutMs((System.nanoTime() - cand.readyNs) / 1e6f, iv)
                                 if (waitMs > 0) {
                                     waitedFor = cand.frameId
@@ -726,37 +895,45 @@ class Pipeline(
                     s?.also { taken ->
                         taken.state = INFER
                         // an older READY slot for the same region is now pointless
-                        for (c in slots) if (c !== taken && c.state == READY && !c.cut && c.region == taken.region) c.state = FREE
+                        for (c in slots) if (c !== taken && c.state == READY && !c.cut && !c.clean && !taken.clean && c.region == taken.region) c.state = FREE
                     }
                 } ?: break
-                tiles.commit(slot.region, slot.tCap, slot.cumX, slot.cumY)
+                if (!slot.clean) tiles.commit(slot.region, slot.tCap, slot.cumX, slot.cumY)
                 val tStart = System.nanoTime()
                 val waitMs = lastWaitMs; lastWaitMs = 0f
                 val cfgNow = censor
                 val out = det.run(slot.pre.output)
                 val tInf = System.nanoTime()
-                val n = decoder.decode(
-                    out, det.coordScale, slot.pre.scale, cfgNow.decodeThreshold, cfgNow.mask,
-                    classAware = true, iouThreshold = 0.45f, maxX = slot.rw.toFloat(), maxY = slot.rh.toFloat(),
+                // v1.8: decode in model-input px (non-square inputs), then map through the layout
+                val n = decoder.decodeXY(
+                    out, det.coordScaleX, det.coordScaleY, cfgNow.decodeThreshold, cfgNow.mask,
+                    classAware = true, iouThreshold = 0.45f, maxX = det.inW.toFloat(), maxY = det.inH.toFloat(),
                     veto = cfgNow.veto,
                 )
+                val lay = slot.pre.layout
                 val r = DetResult(max(n, 1))
-                r.count = n
-                System.arraycopy(decoder.x1, 0, r.x1, 0, n); System.arraycopy(decoder.y1, 0, r.y1, 0, n)
-                System.arraycopy(decoder.x2, 0, r.x2, 0, n); System.arraycopy(decoder.y2, 0, r.y2, 0, n)
-                System.arraycopy(decoder.score, 0, r.score, 0, n); System.arraycopy(decoder.cls, 0, r.cls, 0, n)
+                var m = 0
+                for (i in 0 until n) {
+                    val k = lay?.toSource(decoder.x1[i], decoder.y1[i], decoder.x2[i], decoder.y2[i], box4) ?: -1
+                    if (k < 0 || box4[2] - box4[0] < 1f || box4[3] - box4[1] < 1f) continue
+                    r.x1[m] = box4[0]; r.y1[m] = box4[1]; r.x2[m] = box4[2]; r.y2[m] = box4[3]
+                    r.score[m] = decoder.score[i]; r.cls[m] = decoder.cls[i]; r.part[m] = k
+                    m++
+                }
+                if (lay != null && lay.folded) m = SeamMerge.merge(r.x1, r.y1, r.x2, r.y2, r.score, r.cls, r.part, m)
+                r.count = m
                 r.frameId = slot.frameId; r.tCap = slot.tCap; r.cumX = slot.cumX; r.cumY = slot.cumY
                 r.gen = slot.gen; r.cut = slot.cut
+                r.clean = slot.clean; r.strict = slot.strict; r.cleanWin = slot.cleanWin
                 r.skin = slot.skin.copyOf()
                 r.region = slot.region; r.rx = slot.rx; r.ry = slot.ry; r.rw = slot.rw; r.rh = slot.rh
                 if (slot.region >= 0) {
-                    // tile coords -> frame coords; flag boxes cut by an interior tile edge
-                    val ox = slot.rx.toFloat(); val oy = slot.ry.toFloat()
-                    for (i in 0 until n) {
-                        r.clipped[i] = (slot.rx > 0 && r.x1[i] <= 2f) || (slot.ry > 0 && r.y1[i] <= 2f) ||
-                            (slot.rx + slot.rw < slot.w && r.x2[i] >= slot.rw - 2f) ||
-                            (slot.ry + slot.rh < slot.h && r.y2[i] >= slot.rh - 2f)
-                        r.x1[i] += ox; r.x2[i] += ox; r.y1[i] += oy; r.y2[i] += oy
+                    // (boxes are in frame coords) flag boxes cut by an interior tile edge
+                    val tx2 = (slot.rx + slot.rw).toFloat(); val ty2 = (slot.ry + slot.rh).toFloat()
+                    for (i in 0 until m) {
+                        r.clipped[i] = (slot.rx > 0 && r.x1[i] <= slot.rx + 2f) || (slot.ry > 0 && r.y1[i] <= slot.ry + 2f) ||
+                            (slot.rx + slot.rw < slot.w && r.x2[i] >= tx2 - 2f) ||
+                            (slot.ry + slot.rh < slot.h && r.y2[i] >= ty2 - 2f)
                     }
                 }
                 r.queueMs = (tStart - slot.readyNs) / 1e6f
@@ -764,7 +941,7 @@ class Pipeline(
                 r.inferMs = (tInf - tStart) / 1e6f
                 r.decodeMs = (System.nanoTime() - tInf) / 1e6f
                 inferMsShared = r.inferMs
-                synchronized(lock) { slot.state = FREE; slot.cut = false }
+                synchronized(lock) { slot.state = FREE; slot.cut = false; slot.clean = false }
                 r.doneNs = System.nanoTime()
                 capture.postAtFrontOfQueue { onDetections(r) }
             }
@@ -810,11 +987,18 @@ class Pipeline(
         val tps = tilePassCount * 1000f / max(dt, 1L); val fps = fullPassCount * 1000f / max(dt, 1L)
         tilePassCount = 0; fullPassCount = 0
         val gb = if (!gridBoostEnabled) "off" else String.format(
-            java.util.Locale.US, "%s, %d tiles of %d px, hot %d, full %.1f/s tile %.1f/s, hot-tile cycle %.0f ms",
+            java.util.Locale.US, "%s, %d tiles %d px wide, hot %d, full %.1f/s tile %.1f/s, hot-tile cycle %.0f ms",
             if (!shift.gridLike) "idle (no grid)" else if (tiles.bigContent || lastCap < tiles.bigUntilMs) "idle (large subject)" else "grid",
-            tiles.tiles.size, tiles.tiles.firstOrNull()?.side ?: 0, tiles.hotCount(), fps, tps, tiles.cycleMsEma,
+            tiles.tiles.size, tiles.tiles.firstOrNull()?.w ?: 0, tiles.hotCount(), fps, tps, tiles.cycleMsEma,
         )
-        val hud = hudCompact(model.id, detFps, detPath, ServiceState.paused) + "\n" + String.format(
+        val fl = fullLay
+        val inputLine = String.format(java.util.Locale.US, "input %dx%d %s scale %.2f fill %.0f%% | predict knee %.0f cap %.0f%s",
+            model.w, model.h, if (fl?.folded == true) "fold" else "fit", fl?.minScale ?: 0f, 100f * (fl?.fill ?: 0f),
+            r.kneeMs, Prediction.capFor(r.capMs, r.kneeMs, hintScroll), if (hintScroll) " (app scrolling)" else "")
+        val a11yLine = if (!a11yMode) "a11y mode: off" else String.format(java.util.Locale.US,
+            "a11y mode: %s, scroll ev %d, screens %d, verify %d (drop %d, fail %d)",
+            if (r.sheetActive) "one overlay" else "per-box", hints.scrollEvents, hints.contentSeq, verifyCount, verifyDrops, verifyFails)
+        val hud = hudCompact(model.id, detFps, detPath, ServiceState.paused) + "\n" + inputLine + "\n" + a11yLine + "\n" + String.format(
             java.util.Locale.US,
             "%s | model %s | %s\ncapture: %s | %.0f x %d\n" +
                 "cap %.1f fps (int %.1f) deliver %.1f copy %.2f\n" +
@@ -853,6 +1037,12 @@ class Pipeline(
         const val LEAD_MIN_SPEED = 0.05f
         /** quiet time after a scroll before pre-emptive guards may fire again */
         const val SCROLL_QUIET_MS = 150L
+        /** v1.8: a new screen is judged on frames captured this long after the window change */
+        const val CONTENT_SETTLE_MS = 200L
+        /** v1.8: clean-frame verification of occluded tracks, at most every ... */
+        const val VERIFY_INTERVAL_MS = 500L
+        /** ... and an occluded track goes after this many verifications without a detection */
+        const val VERIFY_MISSES = 2
         /** keep-alive of tracks confirmed by tile passes (tiles revisit slowly) */
         const val TILE_KEEP_MS = 1200L
         /** shift estimator self-tuning thresholds (ms EMA) */

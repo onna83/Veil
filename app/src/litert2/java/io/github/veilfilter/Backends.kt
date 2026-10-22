@@ -29,9 +29,11 @@ object Backends {
         override val backend: String,
         size: ModelSize,
     ) : Detector {
-        override val inputSize = size.px
+        override val inW = size.w
+        override val inH = size.h
         override val numAnchors = size.anchors
-        override val coordScale = size.px.toFloat()
+        override val coordScaleX = size.w.toFloat()
+        override val coordScaleY = size.h.toFloat()
         private val inputs: List<TensorBuffer> = model.createInputBuffers()
         private val outputs: List<TensorBuffer> = model.createOutputBuffers()
 
@@ -66,7 +68,7 @@ object Backends {
             backend = backend,
             priority = CompiledModel.GpuOptions.Priority.HIGH,
             serializationDir = ctx.codeCacheDir.absolutePath,
-            modelCacheKey = "nudenet_${size.id}_${backend.name}_v15",
+            modelCacheKey = "nudenet_${size.id}_${backend.name}_v18",
             serializeProgramCache = true,
         )
         val m = open(ctx, size, opts)
@@ -76,7 +78,7 @@ object Backends {
             else -> "GPU"
         }
         val d = Cm(m, "$name LiteRT2 ${size.id}", size)
-        d.run(FloatArray(3 * size.px * size.px))
+        d.run(FloatArray(3 * size.w * size.h))
         return d
     }
 
@@ -86,7 +88,7 @@ object Backends {
         opts.cpuOptions = CompiledModel.CpuOptions(numThreads = n)
         val m = open(ctx, size, opts)
         val d = Cm(m, "CPU-XNNPACK x$n LiteRT2 ${size.id}", size)
-        d.run(FloatArray(3 * size.px * size.px))
+        d.run(FloatArray(3 * size.w * size.h))
         return d
     }
 
